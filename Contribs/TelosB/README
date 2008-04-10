@@ -1,0 +1,13 @@
+TelosB Contribution
+
+Tomi Pitkaaho (Cenria)
+Zach Shelby (Sensinode)
+
+Basic platform port and example for TelosB compatible platforms. Main testing platform has been the Maxfor 810CM device.
+
+This port is based on the Sensinode Micro platform (/Platform/micro) which has the same chips as in TelosB. However the radio is connected in a different way.
+
+The is still under development, the radio driver needs updating for the TelosB connection of the CC2420.
+
+Tested on NanoStack v1.0.2
+

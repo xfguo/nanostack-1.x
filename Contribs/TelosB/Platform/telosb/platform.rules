@@ -1,0 +1,255 @@
+# telosb platform default rules
+#
+
+#FreeRTOS section
+SRC	= \
+$(SOURCE_DIR)/tasks.c \
+$(SOURCE_DIR)/queue.c \
+$(SOURCE_DIR)/list.c \
+$(PORT_DIR)/port.c
+
+
+ifeq ($(AD_HOC_STATE),1)
+CFLAGS += -DAD_HOC_STATE
+endif
+
+ifeq ($(MAC_RFD),1)
+NWK_CAP = 0
+CFLAGS += -DMAC_RFD
+else
+ifeq ($(HAVE_ROUTING),1)
+CFLAGS += -DHAVE_ROUTING
+endif
+NWK_CAP = MC_FFD_DEVICE
+CFLAGS += -DMAC_FFD
+HAVE_DYNAMIC_BUFFERS=1
+endif
+
+
+ifeq ($(HAVE_DYNAMIC_BUFFERS),1)
+SRC += $(SOURCE_DIR)/portable/MemMang/heap_2.c
+CFLAGS += -DHAVE_DYNAMIC_BUFFERS
+else
+SRC += $(SOURCE_DIR)/portable/MemMang/heap_1.c
+endif
+
+ifeq ($(HAVE_DEBUG),1)
+CFLAGS += -DHAVE_DEBUG
+endif
+
+#Platform driver section
+SRC	+= \
+$(PLATFORM_DIR)/bus.c \
+$(PLATFORM_DIR)/gpio.c \
+$(PLATFORM_DIR)/mac.c \
+$(PLATFORM_DIR)/debug.c \
+$(PLATFORM_DIR)/1wire.c
+
+ifeq ($(HAVE_RF_LED),1)
+CFLAGS += -DHAVE_RF_LED 
+endif
+
+ifeq ($(HAVE_1WIRE),1)
+SRC += $(PLATFORM_DIR)/1wire.c 
+CFLAGS += -DHAVE_1WIRE
+endif
+
+ifeq ($(HAVE_RF802_15_4_RAW),1)
+SRC += $(PLATFORM_DIR)/rf.c 
+CFLAGS += -DRF802_15_4_RAW
+CFLAGS += -DMAC_MODULE=MODULE_RF802_15_4_RAW
+endif
+
+ifeq ($(HAVE_POWERSAVE),1)
+SRC += $(PLATFORM_DIR)/powersave.c
+CFLAGS += -DHAVE_POWERSAVE
+endif
+
+ifeq ($(SUPERFRAME_MODE),1)
+SRC += $(PLATFORM_DIR)/timer.c
+CFLAGS += -DHAVE_PERIOD_TIMER
+CFLAGS += -DSUPERFRAME_MODE
+endif
+
+ifeq ($(SHORT_ADDRESS),0)
+else
+CFLAGS += -DSHORT_ADDRESS=$(SHORT_ADDRESS)
+endif
+
+
+
+ifeq ($(POWER_SOURCE_BATTERY),1)
+NWK_CAP += | MC_POWER_SOURCE
+CFLAGS += -DMC_POWER_SOURCE
+endif
+ifeq ($(RX_ON_WHEN_IDLE),1)
+NWK_CAP += | MC_RX_ON_WHEN_IDLE
+CFLAGS += -DMC_RX_ON_WHEN_IDLE
+endif
+ifeq ($(SEC_SUPPORT),1)
+NWK_CAP += | MC_SECURITY
+CFLAGS += -DMC_SECURITY
+endif
+ifeq ($(SUPPORT_SHORT_ADDRESS),1)
+NWK_CAP += | MC_ALLOCATED_ADDR
+CFLAGS += -DSUPPORT_SHORT_ADDRESS
+endif
+
+CFLAGS += -DNWK_CAP_DEFAULTS="$(NWK_CAP)"
+
+
+
+#NanoStack section
+SRC	+= \
+$(COMMON_DIR)/event_timer.c \
+$(COMMON_DIR)/module.c \
+$(COMMON_DIR)/socket.c \
+$(COMMON_DIR)/stack.c \
+$(COMMON_DIR)/routing.c
+
+ifeq ($(HAVE_NRP),1)
+SRC += $(COMMON_DIR)/modules/nrp.c 
+CFLAGS += -DHAVE_NRP 
+else
+endif
+
+ifeq ($(HAVE_NWK_MANAGER),1)
+SRC += $(COMMON_DIR)/modules/nwk_manager.c 
+CFLAGS += -DHAVE_NWK_MANAGER 
+else
+endif
+
+ifeq ($(HAVE_ICMP),1)
+SRC += $(COMMON_DIR)/modules/icmp.c 
+CFLAGS += -DHAVE_ICMP 
+else
+endif
+
+ifeq ($(HAVE_802_15_4_RAW),1)
+SRC += $(COMMON_DIR)/modules/rf802_15_4_raw.c 
+SRC += $(PLATFORM_DIR)/rf.c 
+CFLAGS += -DHAVE_802_15_4_RAW
+#CFLAGS += -DMAC_MODULE=MODULE_802_15_4_RAW
+else
+ifeq ($(HAVE_RF_802_15_4),1)
+SRC += $(COMMON_DIR)/modules/rf802_15_4.c 
+SRC += $(PLATFORM_DIR)/rf.c 
+CFLAGS += -DHAVE_RF_802_15_4
+#CFLAGS += -DMAC_MODULE=MODULE_RF_802_15_4
+#else
+#CFLAGS += -DMAC_MODULE=MODULE_NONE
+endif
+endif
+
+ifeq ($(HAVE_CIPV6),1)
+SRC += $(COMMON_DIR)/modules/cIPv6.c 
+CFLAGS += -DHAVE_CIPV6
+endif
+
+ifeq ($(HAVE_CUDP),1)
+SRC += $(COMMON_DIR)/modules/cUDP.c 
+CFLAGS += -DHAVE_CUDP
+endif
+
+ifeq ($(HAVE_NUDP),1)
+SRC += $(COMMON_DIR)/modules/nudp.c 
+CFLAGS += -DHAVE_NUDP
+endif
+
+ifeq ($(HAVE_SSI),1)
+SRC += $(COMMON_DIR)/modules/ssi.c 
+CFLAGS += -DHAVE_SSI
+endif
+
+#Application section
+SRC += main.c
+
+
+#Compiler, tools and build options
+WARNINGS=-Wall -Wshadow -Wpointer-arith -Wbad-function-cast -Wcast-align -Wsign-compare \
+		-Waggregate-return -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -Wunused
+
+CFLAGS += -mmcu=msp430x1611 -I. -I$(SOURCE_DIR)/include \
+          -I$(COMMON_DIR)/include -I$(PLATFORM_DIR)/include -DGCC_MSP430 $(WARNINGS)
+
+# Language standard.
+#CFLAGS += -std=c89
+#CFLAGS += -std=gnu89
+#CFLAGS += -std=c99
+CFLAGS += -std=gnu99
+
+# Define programs and commands.
+SHELL = sh
+
+CC = msp430-gcc
+
+OBJCOPY = msp430-objcopy
+OBJDUMP = msp430-objdump
+SIZE = msp430-size
+NM = msp430-nm
+
+# Programming support
+#BSL=msp430-bsl
+BSL=tos-bsl
+MSP_BSL_FLAGS = --telosb
+ifeq ($(BSL_INVERT),1)
+BSL_INV = --invert-test
+BSL_INV += --invert-reset
+else
+BSL_INV=
+endif
+PROG=msp430-jtag
+PROGOPT=-epIr 
+
+# Output format. (can be srec, ihex, binary)
+FORMAT = ihex
+
+REMOVE = rm -f
+COPY = cp
+
+HEXSIZE = $(SIZE) --target=$(FORMAT) $(TARGET).hex
+ELFSIZE = $(SIZE) -B  
+
+# add math library
+LDFLAGS += -lm
+
+all: binary
+	@echo
+
+jtag: binary
+	$(PROG) $(PROGOPT) $(TARGET).$(FORMAT)
+
+bsl: binary
+	$(BSL) $(MSP_BSL_FLAGS) $(BSL_INV) -c $(BSL_PORT) $(PROGOPT) $(TARGET).$(FORMAT)
+
+size: binary
+	$(SIZE) $(OBJS) $(TARGET).elf
+	
+module_id.h: $(PLATFORM_DIR)/platform.rules app.rules Makefile
+	@make clean-deps
+	@echo "--- Generating module_id.h ---"
+	@echo "#ifndef _MODULE_ID_H" > $@
+	@echo "#define _MODULE_ID_H" >> $@
+	@echo "/* module_id.h generated */" >> $@
+	@echo "" >> $@
+	@echo "typedef enum { MODULE_NONE = 0," >> $@
+	@cat $(COMMON_DIR)/modules/*.c | grep -A1 "\[ID\]" | grep -v ID | grep -v "\-\-"  >> $@
+	@echo "MODULE_APP," >> $@
+	@echo "MODULE_MAX } module_id_t;" >> $@
+	@echo "#endif /*_MODULE_ID_H*/" >> $@
+	@echo 
+
+modules_conf.h: $(PLATFORM_DIR)/platform.rules app.rules Makefile
+	@echo "--- Generating modules_conf.h ---"
+	@echo "/* modules_conf.h generated */" > $@
+	@echo "" >> $@
+	@echo "#ifdef COMPILING_MODULE_C" >> $@
+	@cat $(COMMON_DIR)/modules/*.c | grep -A4 "\[FUNCS\]" | grep -v FUNCS | grep -v "\-\-"  >> $@
+	@echo "" >> $@
+	@echo "module_t modules[] = {" >> $@
+	@cat $(COMMON_DIR)/modules/*.c | grep -A3 "\[INFO\]" | grep -v INFO | grep -v "\-\-"  >> $@
+	@echo "{0, 0, 0, 0, MODULE_NONE, 0, ADDR_NONE, 0 } };" >> $@
+	@echo "#else" >> $@
+	@echo "extern module_t modules[];" >> $@	
+	@echo "#endif" >> $@
+	@echo 

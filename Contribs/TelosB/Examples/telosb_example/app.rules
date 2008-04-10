@@ -1,0 +1,71 @@
+#This example program is a preliminary release to demonstrate routing-capable
+#networks.
+
+#Programming configuration
+#for Linux, this is the device file
+BSL_PORT=/dev/ttyUSB0
+
+#for Windows, this is the com port number - 1, 
+#i.e. 0 for COM1:, 9 for COM10:
+#BSL_PORT=2
+
+#this should be 0 for micro products
+BSL_INVERT=0
+
+# List additional build options here
+
+#RF driver configuration options
+CFLAGS += -DCC2420_DEFAULT_POWER=100
+CFLAGS += -DCC2420_DEFAULT_CHANNEL=18
+CFLAGS += -DHAVE_RF_LED=2
+CFLAGS += -DRF_AUTO_ACK
+CFLAGS += -DRF_ADDRESS_DECODER
+
+#Debug UART buffer sizes
+#CFLAGS += -DDEBUG_RX_LEN=8
+#CFLAGS += -DDEBUG_TX_LEN=64
+
+#Module specific debug message macros
+#Don't use multiple debug flags, since excessive
+#debug messages may cause instability and timing problems
+#CFLAGS += -DSTACK_DEBUG
+#CFLAGS += -DCC2420_DEBUG
+#CFLAGS += -DCC2420_DEBUG_RSSI
+#CFLAGS += -DB1W_DEBUG
+#CFLAGS += -DNWK_CONFIG_DEBUG
+#CFLAGS += -DCUDP_DEBUG
+#CFLAGS += -DROUTING_DEBUG
+#CFLAGS += -DCIPV6_DEBUG	
+#CFLAGS += -DSOCKET_DEBUG
+#CFLAGS += -DRF_802_15_4_DEBUG
+#CFLAGS += -DRF_RAW_DEBUG
+
+#Automatic power saving management
+#CFLAGS += -DHAVE_POWERSAVE
+
+#Bus UART driver buffer size
+#CFLAGS += -DBUS_UART_BUFLEN=16
+
+#NanoStack configuration
+
+#Buffers
+CFLAGS += -DSTACK_BUFFERS_MAX=8
+CFLAGS += -DSTACK_BUFFERS_MIN=4
+
+#6lowpan configuration
+
+#HAVE_ROUTING=1
+
+#Rf_802_15_4-modules configuration
+#MAC_FFD=1
+AD_HOC_STATE=1
+CFLAGS += -DPOWER_SOURCE_BATTERY
+CFLAGS  += -DRX_ON_WHEN_IDLE
+
+#Modules
+HAVE_DEBUG=1
+HAVE_CUDP=1
+HAVE_CIPV6=1
+#HAVE_ICMP=1
+HAVE_RF_802_15_4=1
+
