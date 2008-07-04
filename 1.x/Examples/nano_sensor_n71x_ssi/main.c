@@ -71,8 +71,16 @@ int8_t get_adc_value(adc_input_t channel, uint16_t *value);
 ssi_sensor_t ssi_sensor[] =
 {/*  ID             | unit type        |scale|data|status*/
   {1, SSI_DATA_TYPE_INT,  0,   {0},   0},
-  {2, SSI_DATA_TYPE_INT,  0,   {0},   0},
+  {2, SSI_DATA_TYPE_INT,  2,   {0},   0},
   {3, SSI_DATA_TYPE_INT,  0,   {0},   0}
+};
+
+sockaddr_t datasensor_address = 
+{
+	ADDR_802_15_4_PAN_LONG,
+	{ 0xFF, 0xFF, 0xFF, 0xFF, 
+	  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+	61630
 };
 
 const uint8_t *ssi_description[] =
@@ -85,7 +93,7 @@ const uint8_t *ssi_description[] =
 const uint8_t *ssi_unit[] =
 {
 	"RAW",
-	"RAW",
+	"C",
 	"xxxxxx21"
 };
 
@@ -112,7 +120,10 @@ int main( void )
 	bus_init();
 	LED_INIT();
 	N710_SENSOR_INIT();
-
+	/* Start the debug UART at 115k */
+	debug_init(115200);
+	stack_init();
+	button_events = xQueueCreate( 4, 1 /*message size one byte*/ );
 	/* Setup the application task and start the scheduler */
 	xTaskCreate( vAppTask, "App", configMAXIMUM_STACK_SIZE, NULL, (tskIDLE_PRIORITY + 1 ), ( xTaskHandle * )NULL );
 	xTaskCreate( vButtonTask, "Button", configMAXIMUM_STACK_SIZE, NULL, (tskIDLE_PRIORITY + 2 ), ( xTaskHandle * )NULL );
@@ -133,34 +144,17 @@ static void vAppTask( int8_t *pvParameters )
 	uint16_t U1_value = 0;
 	uint16_t U2_value = 0;
 	uint8_t count = 0;
-	int8_t error;
 	
 	pvParameters;
-	
-	/* Start the debug UART at 115k */
-	debug_init(115200);
-	button_events = xQueueCreate( 4, 1 /*message size one byte*/ );
 	
 	led1_count = 50;
 	led2_count = 100;
 	
 	vTaskDelay( 50 / portTICK_RATE_MS );
-
-	/* Initialize NanoStack with default parameters, NanoStack task automatically created. */
-	{
-		if(stack_start(NULL)==START_SUCCESS)
-		{
-			debug("NanoStack Start: Ok.\r\n");
-		}
-	}
 	
 	vTaskDelay( 100 / portTICK_RATE_MS );
 
 	debug("NanoSensor N710 Example Application.\r\n");
-
-	/* Turn IPv6 compression on, UDP compression off */
-	cipv6_compress_mode(1);
-	cudp_compress_mode(0);
 
 	/* Start an endless task loop, we must sleep most of the time allowing execution of other tasks. */
 	for (;;)
@@ -198,10 +192,30 @@ static void vAppTask( int8_t *pvParameters )
 					debug("Reading temp (U2): ");
 					if (get_adc_value(N710_TEMP, &U2_value) == 0)
 					{
-							debug_int(U2_value);
-							ssi_sensor_update(1, (uint32_t) U2_value);
+							int32_t calc_int = (int32_t) U2_value;
+							
+							calc_int /= 4;      /* drop insignificant bits */
+        			//calc_int *= 58608;    /* 3*160.039*1000*1000/8192 (value with         6 decimals)*/
+		     calc_int *= 24420;    /* 1.25*160.039*1000*1000/8192 (value with         6 decimals)*/
+        			calc_int /= 10000;   /* adjust to 2 decimals */
+        			calc_int -= 6785;
+							
+							U2_value = (int16_t) calc_int;
+							
+							debug_int(U2_value/100);
+							debug_put('.');
+							if ((U2_value%100) >= 10)
+							{
+								debug_integer(2, 10, (U2_value%100));
+							}
+							else
+							{
+								debug_hex(U2_value%100);
+							}
 							led1_count = 30;
 							led2_count = 30;
+							
+							ssi_sensor_update(1, (int32_t) U2_value);
 					}
 					else
 					{
@@ -236,6 +250,9 @@ discover_res_t echo_result;
 stack_event_t stack_event;
 int8_t ping_active=0;
 portTickType ping_start = 0;
+uint8_t gw_assoc_state=0;
+uint8_t scan_active=0;
+portTickType	scan_start;
 
 /** 
  * The task for generating button events, also does terminal and ping sending
@@ -255,14 +272,18 @@ static void vButtonTask( int8_t *pvParameters )
 	N710_BUTTON_INIT();
 
 	vTaskDelay( 200 / portTICK_RATE_MS );
-	
-	stack_event 		= open_stack_event_bus();		/* Open socket for stack status message */
-	stack_service_init( stack_event,NULL, 0 , NULL );	/* No Gateway discover */
-
+	stack_event = stack_service_init(NULL);	 /* Open socket for stack status message */
 	channel = mac_current_channel();
 	
 	while (1)
-	{		
+	{
+		if(gw_assoc_state == 0 && scan_active == 0)
+		{
+			LED1_OFF();
+			scan_active=1;
+			scan_start = xTaskGetTickCount();
+			gw_discover();
+		}		
 		/* Sleep for 10 ms or received from UART */
 		byte = debug_read_blocking(10 / portTICK_RATE_MS);
 		if (byte != -1)
@@ -325,7 +346,7 @@ static void vButtonTask( int8_t *pvParameters )
 					}
 					break;
 
-				case 'C':
+				/*case 'C':
 					if (channel < 26) channel++;
 					channel++;
 				case 'c':
@@ -334,7 +355,7 @@ static void vButtonTask( int8_t *pvParameters )
 					debug("Channel: ");
 					debug_int(channel);
 					debug("\r\n");
-					break;
+					break;*/
 						
 				default:
 					debug_put(byte);				
@@ -422,6 +443,7 @@ static void vButtonTask( int8_t *pvParameters )
 					debug(" dbm, ");
 					debug_int(echo_result.result[i].time);
 					debug(" ms\r\n");
+					vTaskDelay(4);
 				}
 				echo_result.count=0;
 			}
@@ -441,29 +463,25 @@ static void vButtonTask( int8_t *pvParameters )
 				switch (parse_event_message(buffer))
 				{
 					case BROKEN_LINK:
-						debug("Route broken to ");
-						debug("\r\n");
-						debug_address(&(buffer->dst_sa));
-						debug("\r\n");
-						break;
-
-					case NO_ROUTE_TO_DESTINATION:
-						debug("ICMP message back, no route ");
-						debug("\r\n");
-						debug_address(&(buffer->dst_sa));
-						debug("\r\n");
+						buffer->dst_sa.port = datasensor_address.port;
+						if(memcmp(&datasensor_address.address, &(buffer->dst_sa.address), 8) == 0)
+						{
+							gw_assoc_state = 0;
+							datasensor_address.addr_type = ADDR_NONE;
+							LED1_OFF();
+						}
+						
 						break;
 					
-					case TOO_LONG_PACKET:
-						debug("Payload Too Length\r\n");
-						break;
-			
-					case DATA_BACK_NO_ROUTE:
-						debug("DATA back, No route");
-						debug("\r\n");
-						debug("To ");
-						debug_address(&(buffer->dst_sa));
-						debug("\r\n");
+					case ROUTER_DISCOVER_RESPONSE:
+						scan_active=0;
+						if(gw_assoc_state==0)
+						{
+							memcpy(datasensor_address.address, buffer->src_sa.address, 8);
+							datasensor_address.addr_type = buffer->src_sa.addr_type ;
+							gw_assoc_state=1;
+							LED1_ON();
+						}
 						break;
 
 					default:
@@ -477,6 +495,11 @@ static void vButtonTask( int8_t *pvParameters )
 				}
 			}
 		} /*end stack events*/
+		if (scan_active == 1 && (xTaskGetTickCount() - scan_start)*portTICK_RATE_MS > 1000)
+		{
+			mac_gw_discover();
+			scan_start = xTaskGetTickCount();
+		}
 	} /*end main loop*/
 }	
 
@@ -484,7 +507,7 @@ int8_t get_adc_value(adc_input_t channel, uint16_t *value)
 {
 	int8_t retval;
 	
-	if (adc_convert_single(channel, ADCREF_AVDD, ADCRES_14BIT) == 0) 
+	if (adc_convert_single(channel, ADCREF_125V, ADCRES_14BIT) == 0) 
 	{
 		retval = 0;
 		while (retval != 1) 

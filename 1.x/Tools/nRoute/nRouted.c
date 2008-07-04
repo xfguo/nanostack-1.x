@@ -390,8 +390,9 @@ int parse_config(void)
 	nRdconf.tcpmaxconn = 1;
 
 	nRdconf.serialbufsize = 20;
-
-
+	nRdconf.gw_adv_period = 0;
+	nRdconf.channel = 18;
+	
 	value = (char *)malloc(128);
 
 
@@ -466,6 +467,14 @@ int parse_config(void)
 			else if((strncmp(keyword, "SERIALBUFSIZE", 13) == 0) && strlen(keyword) == 13)
 			{
 				nRdconf.serialbufsize = atoi(value);
+			}
+			else if((strncmp(keyword, "CHANNEL", 7) == 0) && strlen(keyword) == 7)
+			{
+				nRdconf.channel = atoi(value);
+			}
+			else if((strncmp(keyword, "GW_ADV_PERIOD", 13) == 0) && strlen(keyword) == 13)
+			{
+				nRdconf.gw_adv_period = atoi(value);
 			}
 		}
 		//	Lets adjust the value of variable ret to 0 as

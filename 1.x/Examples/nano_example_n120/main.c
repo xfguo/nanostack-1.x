@@ -62,14 +62,12 @@ static void vMain(int8_t *pvParameters );
 int main( void )
 {
 	bus_init();
-
 	LED1_ON();
 	LED2_ON();
-
-	xTaskCreate( vMain, "Main", configMAXIMUM_STACK_SIZE, NULL, ( tskIDLE_PRIORITY + 0 ), ( xTaskHandle * )NULL );	
-
+	debug_init(115200);
+	stack_init();
+	xTaskCreate( vMain, "Main", configMAXIMUM_STACK_SIZE, NULL, ( tskIDLE_PRIORITY + 1 ), ( xTaskHandle * )NULL );	
 	vTaskStartScheduler();
-
 	return 0;
 }
 
@@ -81,71 +79,47 @@ sockaddr_t test_address =
 	61619
 };
 
-sockaddr_t broadcast_address = 
-{
-	ADDR_802_15_4_PAN_LONG,
-	{ 0xFF, 0xFF, 0xFF, 0xFF, 
-	  0xFF, 0xFF, 0xFF, 0xFF },
-	254
-};
-
 discover_res_t echo_result;
 
 buffer_t *test_buffer, *buffer;
 stack_event_t stack_event;
-
+#ifndef STACK_RING_BUFFER_MODE
 extern xQueueHandle buffers;
-
+#endif
 static void vMain(int8_t *pvParameters )
 {
 	int16_t byte;
-	uint8_t count = (uint8_t) pvParameters;
-	uint8_t msg;
 	int8_t ping_active=0;
-	uint16_t ping_counter = 0;
-	portTickType ping_ticks;
 	portTickType ping_start = 0;
 	uint8_t flags = 1, i;
 	uint8_t channel;
-	
-	
-	debug_init(115200);
-	
+	pvParameters;
 	debug("nano_example\r\n");
 	vTaskDelay(200/portTICK_RATE_MS);
 	LED1_OFF();
 	LED2_OFF();
-	
-	stack_start(NULL);
-
-	stack_event 		= open_stack_event_bus();		/* Open socket for stack status message */
-	stack_service_init( stack_event,NULL, 0 , NULL );	/* No Gateway discovery */
-	
+	stack_event = stack_service_init(NULL);	 /* Open socket for stack status message */
 	channel = mac_current_channel();
 	
 	for( ;; )
-	{
-		msg = 0;
-		
-		byte = debug_read_blocking(2 + ((ping_active ^ 1)* 100/portTICK_RATE_MS));
+	{	
+		byte = debug_read_blocking(100/portTICK_RATE_MS);
 
 		if (byte != -1)
 		{
-			count = 3;
-
-			msg = 2;
 	 		switch(byte)
 			{
 				case 'h':
 					debug("Shell help:\r\np - Send broadcast ping\r\n");
 					debug("u - Send broadcast UDP echo\r\nm - Print MAC address\r\n");
+					debug("c - Decrease channel\r\nC - Increase channel\r\n");
 					break;
-					
+					#ifndef STACK_RING_BUFFER_MODE
 				case 'b':
 					debug_int(uxQueueMessagesWaiting(buffers));
 					debug(" buffers available.\r\n");
 					break;	
-				
+				#endif
 				case 'C':
 					if (channel < 26) channel++;
 					channel++;
@@ -156,7 +130,7 @@ static void vMain(int8_t *pvParameters )
 					debug_int(channel);
 					debug("\r\n");
 					break;
-						
+					
 				case 'r':
 					flags ^= 1;
 					bus_reg(flags & 1);
@@ -228,7 +202,6 @@ static void vMain(int8_t *pvParameters )
 
 				case '\r':
 					debug("\r\n");
-					msg = 0;
 					break;
 
 				case 'm':
@@ -262,28 +235,12 @@ static void vMain(int8_t *pvParameters )
 						debug_address(&(buffer->dst_sa));
 						debug("\r\n");
 						break;
-
-					case NO_ROUTE_TO_DESTINATION:
-						debug("ICMP message back, no route ");
-						debug("\r\n");
-						debug_address(&(buffer->dst_sa));
-						debug("\r\n");
-						break;
 					
 					case TOO_LONG_PACKET:
 						debug("Payload Too Length\r\n");
 						break;
-			
-					/*case DATA_BACK_NO_ROUTE:
-						debug("DATA back, No route");
-						debug("\r\n");
-						debug("To ");
-						debug_address(&(buffer->dst_sa));
-						debug("\r\n");
-						break;*/
 
 					default:
-
 						break;
 				}
 				
@@ -307,6 +264,7 @@ static void vMain(int8_t *pvParameters )
 					debug(" dbm, ");
 					debug_int(echo_result.result[i].time);
 					debug(" ms\r\n");
+					vTaskDelay(4);
 				}
 				echo_result.count=0;
 			}
@@ -317,11 +275,6 @@ static void vMain(int8_t *pvParameters )
 			test_buffer = 0;
 			ping_active = 0;
 		}
-		if (count > 20)
-		{
-		 	count = 0;
-	 	}
-		count++;
 	}
 }
 

@@ -229,16 +229,11 @@ static uint16_t rand_seed = 0xCBFA;
  */
 uint16_t random_generate(uint16_t range) 
 {
-	uint8_t i;
 	uint32_t retval;
 
+	rand_seed += ((uint16_t) RNDH << 8) + RNDL;
 	RNDL = ST0;	
-	for (i=0; i<4; i++)
-	{
-		rand_seed += ((uint16_t) RNDH << 8) + RNDL;
-		RNDL = ST0;	
-	}
 	
-	retval = rand_seed * range;
+	retval = (uint32_t) rand_seed * (uint32_t) range;
 	return (retval >> 16);
 }

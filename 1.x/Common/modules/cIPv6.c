@@ -57,7 +57,7 @@
 #include "rf.h"
 #include "cipv6.h"
 #include "socket.h"
-
+#include "gpio.h"
 /*
 [NAME]
 CIPV6
@@ -75,25 +75,23 @@ extern portCHAR cipv6_init(buffer_t *buf);
 extern portCHAR cipv6_handle( buffer_t *buf );
 extern portCHAR cipv6_check( buffer_t *buf );
 
-uint8_t check_broadcast_id(addrtype_t addrtype, address_t address, uint8_t sqn);
+uint8_t check_broadcast_id(namomesh_info_t *bc_t);
+uint8_t add_own_address(uint8_t *d_ptr);
 extern sockaddr_t mac_long;
 
 #ifdef HAVE_MAC_15_4
 extern portCHAR mac_handle(	buffer_t *buf );
 #endif
 
-#ifdef HAVE_RF_802_15_4
-extern xQueueHandle rf_802_15_4_queue;
+#ifdef MALLFORMED_HEADERS
+extern uint8_t mallformed_headers_cnt;
 #endif
-
 cipv6_ib_t cipv6_pib;
 flooding_table_t flooding_table;
-route_check_t route_check;
-addrtype_t o_addrtype = ADDR_NONE;
-address_t ori_address;
-uint8_t dest_length=0, hops_to_ori=0;
+namomesh_info_t namomesh_info;
 
-nano_mesh_response_t nanomesh_delivery;
+
+
 #ifdef HAVE_ROUTING
 buffer_t *forward_buffer = 0;
 #endif
@@ -111,6 +109,7 @@ portCHAR cipv6_init( buffer_t *buf )
 	for(i=0; i<FLOODING_INFO_SIZE; i++)
 	{
 		flooding_table.info[i].type = ADDR_NONE;
+		flooding_table.info[i].last_sqn = 0;
 	}
 	cipv6_pib.own_brodcast_sqn = 0;
 	cipv6_pib.use_short_address=0;
@@ -152,19 +151,543 @@ void cipv6_compress_mode( uint8_t mode )
  */
 portCHAR cipv6_handle( buffer_t *buf )
 {
+	uint8_t tmp_8=0;
+	uint8_t lowpan_dispatch=0;
+	uint8_t *dptr;
+
   	/* Process the packet */		
 	if(cipv6_pib.own_brodcast_sqn == 0)
 	{
 		cipv6_pib.own_brodcast_sqn = mac_long.address[0];
 	}	
 	debug("IP:");
-	switch(buf->dir)
+
+	if(buf->options.handle_type == HANDLE_TTL_UPDATE)
 	{
-		case BUFFER_DOWN:
-			//debug("IP:DOWN\r\n");
+		debug("TTL\r\n");
+		update_tables_ttl((&buf->dst_sa));
+		stack_buffer_free(buf);
+		return pdTRUE;
+	}
+	else if(buf->options.handle_type == HANDLE_BROKEN_LINK)
+	{
+		debug("BR\r\n");
+		buf->options.handle_type = HANDLE_DEFAULT;
+		ip_broken_link_notify(buf, 0);
+		return pdTRUE;
+	}
+
+	if(buf->dir == BUFFER_UP)
+	{
+		memcpy(&(namomesh_info.adr),&(buf->src_sa), sizeof(sockaddr_t) );
+		namomesh_info.last_sqn = buf->options.lowpan_compressed;
+		namomesh_info.event = UPDATE_NEIGHBOUR;
+		taskENTER_CRITICAL();
+		tmp_8 = update_neighbour_table(&(namomesh_info));
+		taskEXIT_CRITICAL();
+		if(tmp_8 == 0)
+		{
+			debug("drop\r\n");
+			stack_buffer_free(buf);
+			return pdTRUE;
+		}
+		tmp_8 = 0;
+		debug("UP");
+		/* Lets check header start type */
+		if(buf->buf[buf->buf_ptr] == IPV6)
+		{
+			//debug("IPV6\r\n");
+#ifdef SUPPORT_UNCOMP_IPV6
+			parse_ipv_header(buf);
+			buf=0;
+#else
+#ifdef MALLFORMED_HEADERS
+			mallformed_headers_cnt++;
+#endif
+			stack_buffer_free(buf);
+			buf=0;
+#endif
+		}
+		else
+		{
+			buf->options.lowpan_compressed=0;
+			switch (buf->buf[buf->buf_ptr] & LOWPAN_TYPE_BM )
+			{
+			/* Normal unicast send-mode */
+				case DISPATCH_TYPE:
+					debug("DIS\r\n");
+					/* Parse Unicast packet from neighbor */
+
+					dptr = buf->buf + buf->buf_ptr;
+					lowpan_dispatch = *dptr++;
+					if(lowpan_dispatch == LOWPAN_HC1)
+					{
+						/* Check HC1 options */
+						tmp_8= *dptr++;
+						if((tmp_8 == HC1_NEXT_HEADER_COMPRESSED_UDP || tmp_8 == HC1_NEXT_HEADER_UNCOMPRES_UDP) || tmp_8 == IP_HEADER_FOR_ICMP)
+						{
+							if(tmp_8 == IP_HEADER_FOR_ICMP)
+							{
+								buf->to = MODULE_ICMP;
+							}
+							else
+							{
+								buf->to = MODULE_CUDP;
+								if(tmp_8 == HC1_NEXT_HEADER_COMPRESSED_UDP) /* Read udp encode field */
+									buf->options.lowpan_compressed = *dptr++;
+							}
+				
+							*dptr -= 1;
+							buf->options.hop_count = (GENERAL_HOPLIMIT - *dptr);
+							dptr++;
+							buf->buf_ptr = (dptr - buf->buf); /*cut header*/
+							buf->from = MODULE_CIPV6;
+							buf->to = MODULE_NONE;
+							stack_buffer_push(buf);
+							return pdTRUE;
+						}
+						else
+						{
+							debug("Dis:hc1\r\n");
+							stack_buffer_free(buf);
+							return pdTRUE;
+						}
+					}
+					else
+					{
+						#ifdef MALLFORMED_HEADERS
+							mallformed_headers_cnt++;
+#endif
+						stack_buffer_free(buf);
+						return pdTRUE;
+					}
+					break;	
+				
+				/* Packet deliverymode is mesh */	
+					case MESH_ROUTING_TYPE: /* Mesh Routing */
+					{
+						uint8_t hops_left=0,mesh_header,i, bc_filter=1;
+						uint8_t tmp;
+						uint8_t dest_length=0;
+						match_type_t address_mode = NOT_OWN;
+						debug("MES\r\n");
+						/* Process the packet */
+						dptr = buf->buf + buf->buf_ptr;
+
+						/* Parse mesh header  */
+						mesh_header = *dptr;
+						hops_left = (mesh_header & 0xf0);
+						hops_left = hops_left >> 4;
+						hops_left--;
+						namomesh_info.hop = hops_left;
+						i = (mesh_header & 0x0f);
+						tmp = hops_left;
+						tmp <<= 4;
+						*dptr++ = (tmp | i);
+						/* Check Originator and Final-destination address */
+						/* Originator */
+						tmp=(mesh_header & MESH_ADDRESSTYPE_BM);
+						tmp_8 = (tmp & O_ADDRESSTYPE_BM);
+				
+						if(tmp_8 == O_ADDRESSTYPE_16)
+						{
+							namomesh_info.adr.addr_type = ADDR_802_15_4_PAN_SHORT;
+							dest_length=2;
+						}
+						else
+						{
+							namomesh_info.adr.addr_type = ADDR_802_15_4_PAN_LONG;
+							dest_length=8;	
+						}
+						for(i=0;i<dest_length;i++)
+						{
+							namomesh_info.adr.address[i] = *dptr++;
+						}
+
+						/* Final Dst */
+						tmp_8 = (tmp & D_ADDRESSTYPE_BM);
+
+						if(tmp_8 == D_ADDRESSTYPE_16)
+						{
+							buf->dst_sa.addr_type =  ADDR_802_15_4_PAN_SHORT;
+							dest_length=2;
+						}
+						else
+						{
+							buf->dst_sa.addr_type=ADDR_802_15_4_PAN_LONG;
+							dest_length=8;
+						}
+						for(i=0;i<dest_length;i++)
+						{
+							buf->dst_sa.address[i] = *dptr++;
+						}
+
+						/* Parse rest of IP header */
+						lowpan_dispatch = *dptr++;
+						tmp=1;
+						if(lowpan_dispatch == LOWPAN_BC0)
+						{
+							namomesh_info.last_sqn = *dptr++;
+							//tmp = *dptr++;
+							lowpan_dispatch = *dptr++;
+							address_mode = BCAST;
+							
+							if(compare_ori_to_own(&(namomesh_info.adr)) == pdTRUE)
+							{
+								//debug(" Dis:BCO own\r\n");
+								address_mode = DISCARD;
+								tmp=0;
+							}
+							else
+							{
+								taskENTER_CRITICAL();
+								bc_filter = check_broadcast_id(&namomesh_info);
+								taskEXIT_CRITICAL();
+								
+								tmp=1;
+								if(bc_filter != 1)
+								{
+									//debug(" Dis:BCO\r\n");
+									address_mode = DISCARD;
+									if(bc_filter == 0)
+									{
+										tmp = 0;
+									}
+								}	
+							}
+						}
+
+						if(lowpan_dispatch == LOWPAN_HC1 && tmp == 1) 
+						{
+							/* Check HC1 options */
+							tmp_8= *dptr++;
+							if((tmp_8 == HC1_NEXT_HEADER_COMPRESSED_UDP || tmp_8 == HC1_NEXT_HEADER_UNCOMPRES_UDP) || tmp_8 == IP_HEADER_FOR_ICMP)
+							{
+								if(tmp_8 == IP_HEADER_FOR_ICMP)
+								{
+									buf->to = MODULE_ICMP;
+								}
+								else
+								{
+									buf->to = MODULE_CUDP;
+									if(tmp_8 == HC1_NEXT_HEADER_COMPRESSED_UDP) /* Read udp encode field */
+										buf->options.lowpan_compressed = *dptr++;
+								}
+					
+								*dptr -= 1;
+								buf->options.hop_count = (GENERAL_HOPLIMIT - *dptr);
+								dptr++;
+
+					#ifdef HAVE_ROUTING						
+								if(buf->options.hop_count > 1 )
+								{
+									
+									memcpy(&(namomesh_info.adr2),&(buf->src_sa), sizeof(sockaddr_t) );
+									namomesh_info.hop = buf->options.hop_count;
+									namomesh_info.lqi = buf->options.rf_lqi;
+									namomesh_info.event = 0;
+									taskENTER_CRITICAL();
+									update_routing_table( &namomesh_info);
+									taskEXIT_CRITICAL();
+								}
+					#endif
+							}
+							else
+							{
+								#ifdef MALLFORMED_HEADERS
+									mallformed_headers_cnt++;
+#endif
+								//debug("Dis:HC1\r\n");
+								address_mode = DISCARD;
+							}
+						}
+						else
+						{
+							#ifdef MALLFORMED_HEADERS
+							mallformed_headers_cnt++;
+#endif
+							//debug("NOT sup\r\n");
+							address_mode = DISCARD;
+						}
+						
+
+						if(address_mode == DISCARD)
+						{
+							stack_buffer_free(buf);
+							return pdTRUE;
+						}
+
+						/* Check destination */
+						if(address_mode == NOT_OWN)
+						{
+							if(compare_ori_to_own(&(namomesh_info.adr)) == pdTRUE)
+							{
+								control_message_t *msg;
+					#ifdef HAVE_ROUTING
+								memcpy(&(namomesh_info.adr),&(buf->dst_sa), sizeof(sockaddr_t) );
+								namomesh_info.hop = 0;
+									namomesh_info.lqi = 0;
+									namomesh_info.event = REMOVE_ROUTE;
+									taskENTER_CRITICAL();
+									update_routing_table( &namomesh_info);
+									taskEXIT_CRITICAL();	
+					#endif
+								buf->options.type = BUFFER_CONTROL;
+								msg = ( control_message_t*) buf->buf;
+								msg->message.ip_control.message_id = BROKEN_LINK;
+								buf->from = MODULE_CIPV6;
+								buf->socket = 0;
+								msg->message.ip_control.message.broken_link_detect.reason = NO_ROUTE_TO_DESTINATION_TYPE;
+								debug("Route loop err\r\n");
+								push_to_app(buf);
+								return pdTRUE;
+							}
+							if(buf->dst_sa.addr_type==ADDR_802_15_4_PAN_LONG)
+							{
+								if (memcmp(buf->dst_sa.address, mac_long.address, 8) == 0)
+								{
+									address_mode = OWN;
+								}
+							}
+							else
+							{
+								if (memcmp(buf->dst_sa.address, cipv6_pib.short_address, 2) == 0)
+								{
+									address_mode = OWN;
+								}
+							}		
+						}
+
+						if(namomesh_info.adr.addr_type == ADDR_802_15_4_PAN_LONG)
+						{
+							dest_length=8;
+						}
+						else
+						{
+							dest_length=2;
+						}
+
+						for(i=0; i<dest_length;i++)
+						{
+							buf->src_sa.address[i] = namomesh_info.adr.address[i];
+						}
+			
+						buf->src_sa.addr_type = namomesh_info.adr.addr_type;
+						if(address_mode==OWN || address_mode==BCAST)
+						{
+							#ifdef HAVE_ROUTING
+							#ifndef HAVE_NRP
+								if(hops_left != 0 && address_mode == BCAST)
+								{
+									#ifdef STACK_RING_BUFFER_MODE
+									if(stack_buffer_count() > 2)
+									#else
+									if(uxQueueMessagesWaiting(buffers) > 2)
+									#endif
+									{
+										forward_buffer=0;
+										/* Get new buffer for forwarding */
+										forward_buffer = stack_buffer_get(0);
+										if (forward_buffer)
+										{
+											/* Copy original buffer for forwarding */
+											memcpy(forward_buffer, buf, sizeof(buffer_t) + buf->buf_end);
+											forward_buffer->src_sa.addr_type = ADDR_NONE;
+											forward_buffer->dst_sa.addr_type = ADDR_BROADCAST;
+											forward_buffer->from = MODULE_CIPV6;
+											forward_buffer->to = MODULE_NONE;
+											forward_buffer->dir = BUFFER_DOWN;
+											forward_buffer->options.type = BUFFER_DATA;
+											stack_buffer_push(forward_buffer);
+											forward_buffer=0;
+										}
+									}
+						
+								}
+							#endif
+							#endif
+								buf->buf_ptr = (dptr - buf->buf); /*cut header*/
+								buf->from = MODULE_CIPV6;
+								buf->to = MODULE_NONE;
+								stack_buffer_push(buf);
+								buf=0;
+						}
+						#ifdef HAVE_ROUTING	
+						else if(address_mode == NOT_OWN)
+						{
+							if(compare_ori_to_own(&(buf->src_sa)) == pdTRUE)
+							{
+								control_message_t *msg;
+								memcpy(&(namomesh_info.adr),&(buf->dst_sa), sizeof(sockaddr_t) );
+								namomesh_info.hop = 0;
+								namomesh_info.lqi = 0;
+								namomesh_info.event = REMOVE_ROUTE;
+								taskENTER_CRITICAL();
+								update_routing_table( &namomesh_info);
+								taskEXIT_CRITICAL();
+								buf->options.type = BUFFER_CONTROL;
+								msg = ( control_message_t*) buf->buf;
+								msg->message.ip_control.message_id = BROKEN_LINK;
+								buf->from = MODULE_CIPV6;
+								buf->socket = 0;
+								msg->message.ip_control.message.broken_link_detect.reason = NO_ROUTE_TO_DESTINATION_TYPE;
+								debug("Route loop err\r\n");
+								push_to_app(buf);
+								return pdTRUE;
+							}
+
+							if(hops_left > 0)
+							{
+
+								buf->from = MODULE_CIPV6;
+								buf->to = MODULE_NANOMESH;
+								stack_buffer_push(buf);
+								buf=0;
+							}
+							else
+							{
+								/* Route error support only 3 hops */
+								//stack_buffer_free(buf);
+								taskENTER_CRITICAL();
+								ip_broken_link_notify(buf, 1);
+								taskEXIT_CRITICAL();
+								buf=0;
+							}
+						}
+						#endif
+					}
+					break;	/* END_OF_MESH_ROUTING_TYPE */
+				
+				default:
+					#ifdef MALLFORMED_HEADERS
+							mallformed_headers_cnt++;
+#endif
+					debug("Dis\r\n");
+					stack_buffer_free(buf);
+					break;
+			}
+		}	
+	}
+	else if(buf->dir == BUFFER_DOWN)
+	{
 			debug("DOWN\r\n");
 			if(cipv6_pib.use_full_compress)
-				build_lowpan_header(buf);
+			{
+				uint8_t header_size, i;
+				uint8_t mesh_header = MESH_ROUTING_TYPE;
+				header_size = 3;
+				if((buf->from == MODULE_CUDP) && buf->options.lowpan_compressed)
+					header_size++;
+			
+				if(buf->dst_sa.addr_type != ADDR_COORDINATOR)
+				{
+					if(stack_check_broadcast(buf->dst_sa.address, buf->dst_sa.addr_type) == pdTRUE)
+					{
+						buf->dst_sa.addr_type = ADDR_BROADCAST;
+					}
+				}
+				if(buf->dst_sa.addr_type == ADDR_BROADCAST)
+				{
+					
+					mesh_header |= D_ADDRESSTYPE_16;
+					header_size +=5;
+					if(cipv6_pib.use_short_address)
+					{
+						mesh_header |= O_ADDRESSTYPE_16;
+						header_size +=2;
+					}
+					else
+					{
+						mesh_header |= O_ADDRESSTYPE_64;
+						header_size +=8;
+					}
+#ifdef HAVE_NRP
+					mesh_header |= (GENERAL_HOPLIMIT<<4);
+#else
+#ifdef HAVE_ROUTING
+					/*if(buf->options.hop_count)
+						mesh_header |= (buf->options.hop_count<<4);
+					else
+						mesh_header |= (1<<4);*/
+
+					mesh_header |= (GENERAL_HOPLIMIT<<4);
+#else
+					mesh_header |= (1<<4);
+#endif/*HAVE_ROUTING*/
+#endif/*HAVE_NRP*/
+					memset(buf->dst_sa.address, 0xff, 4); 
+				}
+
+				if(stack_buffer_headroom(buf,header_size) == pdFALSE)
+				{
+					//control_message_t *ptr = ( control_message_t*) buf->buf;
+					//ptr->message.ip_control.message_id = TOO_LONG_PACKET;
+					//push_to_app(buf);
+					//buf=0;
+					stack_buffer_free(buf);
+					return pdTRUE;
+				}
+				buf->buf_ptr -= header_size; /* lowpan-dispatch+HC1 = header space */
+				dptr = buffer_data_pointer(buf);
+				if(buf->dst_sa.addr_type == ADDR_BROADCAST)
+				{
+					*dptr++ = mesh_header;
+					/* Build Mesh delivery address field*/
+					/* Originator address */
+					dptr += add_own_address(dptr);
+					for(i=0; i<2 ;i++)
+					{
+						*dptr++ = buf->dst_sa.address[i];
+					}
+					buf->dst_sa.addr_type = ADDR_BROADCAST;
+					buf->src_sa.addr_type = ADDR_NONE;
+					/* Mesh broadcast header type and sequence number */
+					*dptr++ = LOWPAN_BC0;
+					*dptr++ = cipv6_pib.own_brodcast_sqn;
+					update_ip_sqn();
+#ifdef HAVE_MAC_15_4
+					buf->to = MODULE_MAC_15_4;
+#else
+					buf->to = MODULE_RF_802_15_4;
+#endif
+				}
+				else
+				{
+					buf->to = MODULE_NANOMESH;
+					if(cipv6_pib.use_short_address)
+					{
+						memcpy(&(buf->src_sa.address),cipv6_pib.short_address,2);
+						buf->src_sa.addr_type = ADDR_802_15_4_PAN_SHORT;
+						
+					}
+					else
+					{
+						memcpy(&(buf->src_sa.address),mac_long.address,8);
+						buf->src_sa.addr_type = ADDR_802_15_4_PAN_LONG;
+					}
+				}
+				*dptr++ = LOWPAN_HC1; 	/* LowPan Dispatch	 */
+				/* HC1 encode */
+				if(buf->from == MODULE_ICMP)
+					*dptr++ = IP_HEADER_FOR_ICMP;
+				else
+				{
+					if(buf->options.lowpan_compressed)
+					{
+						*dptr++ = HC1_NEXT_HEADER_COMPRESSED_UDP;
+						*dptr++ = buf->options.lowpan_compressed;
+					}		
+					else 
+						*dptr++ = HC1_NEXT_HEADER_UNCOMPRES_UDP;
+				}
+				*dptr++ = GENERAL_HOPLIMIT;	/* Hop-limit	*/
+				buf->from = MODULE_CIPV6;
+				//buf->to = MODULE_NONE;
+				stack_buffer_push(buf);
+				buf=0;
+
+
+			}
 			else
 			{
 #ifdef SUPPORT_UNCOMP_IPV6
@@ -174,51 +697,8 @@ portCHAR cipv6_handle( buffer_t *buf )
 				buf=0;
 #endif
 			}
-			break;
-
-		case BUFFER_UP:			/* From Lower layer(usually RF802.15.4) */
-			/* Lets check header start type */
-			debug("UP");
-			if(buf)
-			{
-				if(buf->buf[buf->buf_ptr] == IPV6)
-				{
-					debug("IPV6\r\n");
-#ifdef SUPPORT_UNCOMP_IPV6
-					parse_ipv_header(buf);
-					buf=0;
-#else
-					stack_buffer_free(buf);
-					buf=0;
-#endif
-				}
-				else
-				{
-					switch (buf->buf[buf->buf_ptr] & LOWPAN_TYPE_BM )
-					{
-					/* Normal unicast send-mode */
-						case DISPATCH_TYPE:
-							debug("DIS\r\n");
-							/* Parse Unicast packet from neighbor */
-							parse_lowpan_packet(buf, DISPATCH_TYPE);
-							break;	
-			
-						/* Packet deliverymode is mesh */	
-						case MESH_ROUTING_TYPE: /* Mesh Routing */
-							debug("MES\r\n");
-							parse_lowpan_packet(buf, MESH_ROUTING_TYPE);
-						break;	/* END_OF_MESH_ROUTING_TYPE */
-			
-						default:
-							debug("Discard header\r\n");
-							stack_buffer_free(buf);
-						break;
-					}
-				}
-			}
-		break;
-						
 	}
+
 return pdTRUE;
 }
 
@@ -262,491 +742,6 @@ portCHAR cipv6_check( buffer_t *buf )
 	}
 }
 
-
-void parse_lowpan_packet(buffer_t *buf, uint8_t packet_type)
-{
- 	/* Process the packet */
- 	uint8_t tmp_8=0,mesh_header=0,hops_left=0,i,bc_seq=0;
- 	uint8_t lowpan_dispatch,tmp, bc=0;
-	uint8_t broadcast_ori_check=0;
-	uint8_t *dptr;
-
-	match_type_t address_mode = NOT_OWN;
-
-	dptr = buf->buf + buf->buf_ptr;
-
-	if(packet_type==MESH_ROUTING_TYPE)
-	{				
-		mesh_header = *dptr;
-		hops_left = (mesh_header & 0xf0);
-		hops_left = hops_left >> 4;
-		hops_left--;
-		i = (mesh_header & 0x0f);
-		tmp = hops_left;
-		tmp <<= 4;
-		*dptr++ = (tmp | i);
-		/* Check Originator and Final-destination address */
-		tmp=(mesh_header & MESH_ADDRESSTYPE_BM);
-		tmp_8 = (tmp & O_ADDRESSTYPE_BM);
-
-		if(tmp_8 == O_ADDRESSTYPE_16)
-		{
-			o_addrtype=ADDR_802_15_4_PAN_SHORT;
-			dest_length=2;
-		}
-		else
-		{
-			o_addrtype=ADDR_802_15_4_PAN_LONG;
-			dest_length=8;	
-		}
-	
-		for(i=0; i < dest_length; i++)
-		{
-			ori_address[i] = *dptr++;
-		}
-		tmp_8 = (tmp & D_ADDRESSTYPE_BM);
-	
-		if(tmp_8 == D_ADDRESSTYPE_16)
-		{
-			buf->dst_sa.addr_type =  ADDR_802_15_4_PAN_SHORT;
-			dest_length=2;
-		}
-		else
-		{
-			buf->dst_sa.addr_type=ADDR_802_15_4_PAN_LONG;
-			dest_length=8;
-		}
-	
-		for(i=0; i < dest_length; i++)
-		{
-			buf->dst_sa.address[i] = *dptr++;
-		}
-		/* compare final-destination address to own address */
-		address_mode = OWN;
-		if(buf->dst_sa.addr_type==ADDR_802_15_4_PAN_LONG)
-		{
-			if (memcmp(buf->dst_sa.address, mac_long.address, 8) != 0)
-			{
-				if(stack_check_broadcast(buf->dst_sa.address, ADDR_802_15_4_PAN_LONG) != pdTRUE)
-					address_mode = NOT_OWN;
-				else
-					address_mode = BCAST;
-			}
-		}
-		else
-		{
-			if (memcmp(buf->dst_sa.address, cipv6_pib.short_address, 2) != 0)
-			{
-				if(stack_check_broadcast(buf->dst_sa.address, ADDR_SHORT) != pdTRUE)
-					address_mode = NOT_OWN;
-				else
-					address_mode = BCAST;
-			}
-		}
-		bc_seq=0;
-		bc=0;
-	}
-	else
-	{
-		address_mode=OWN;
-	}
-	
-	/* Parse rest of IP header */
-	lowpan_dispatch=0;
-	lowpan_dispatch = *dptr++;
-	if(lowpan_dispatch == LOWPAN_BC0)
-	{
-		bc=1;
-		bc_seq = *dptr++;
-		lowpan_dispatch=0;
-		lowpan_dispatch = *dptr++;
-	}
-
-	if(lowpan_dispatch == LOWPAN_HC1)
-	{
-		/* Check HC1 options */
-		tmp_8= *dptr++;
-		if((tmp_8 == HC1_NEXT_HEADER_COMPRESSED_UDP || tmp_8 == HC1_NEXT_HEADER_UNCOMPRES_UDP) || tmp_8 == IP_HEADER_FOR_ICMP)
-		{
-			if(tmp_8 == IP_HEADER_FOR_ICMP)
-			{
-				buf->to = MODULE_ICMP;
-			}
-			else
-			{
-				buf->to = MODULE_CUDP;
-				if(tmp_8 == HC1_NEXT_HEADER_COMPRESSED_UDP) /* Read udp encode field */
-					buf->options.lowpan_compressed = *dptr++;
-			}
-
-			*dptr -= 1;
-			hops_to_ori = (GENERAL_HOPLIMIT - *dptr);
-			dptr++;
-
-			if(tmp_8 == IP_HEADER_FOR_ICMP) 
-				buf->options.hop_count = hops_to_ori;
-
-			if(packet_type==MESH_ROUTING_TYPE)
-			{
-				/* Broadcast flow filter */
-				i=0;
-				if(compare_ori_to_own(o_addrtype, ori_address) == pdTRUE)
-				{
-					broadcast_ori_check = 2;
-				}
-				else
-				{
-					if(address_mode == BCAST || (bc !=0) )
-					{
-						broadcast_ori_check = check_broadcast_id(o_addrtype, ori_address, bc_seq);
-						if(broadcast_ori_check == 0)
-						{
-							i=1;
-						}
-					}
-				}	
-#ifdef HAVE_ROUTING							
-				if((hops_to_ori > 1 && broadcast_ori_check!=2) && buf->options.rf_lqi > 0x15)
-				{
-					update_routing_table( o_addrtype, ori_address, buf->src_sa.addr_type, buf->src_sa.address,  hops_to_ori, buf->options.rf_dbm, i);
-				}
-#endif
-	
-				if(bc && broadcast_ori_check !=1)
-				{
-					address_mode = DISCARD;
-				}
-			}
-		}
-		else
-		{
-			debug("Dis:HC1 err\r\n");
-			address_mode = DISCARD;
-		}
-	}
-	else
-	{
-		debug_int(lowpan_dispatch);
-		debug("NOT sup\r\n");
-		
-		address_mode = DISCARD;
-	}
-
-	/* Handle  IP payload payload */
-	switch (address_mode)
-	{
-		case OWN: /* we are final destination */
-		case BCAST:
-			/* Copy originator address to src field */
-			if(packet_type == MESH_ROUTING_TYPE)
-			{
-				if(o_addrtype == ADDR_802_15_4_PAN_LONG)
-					memcpy(buf->src_sa.address,ori_address, 8);
-				else
-					memcpy(buf->src_sa.address,ori_address, 2);
-	
-				buf->src_sa.addr_type = o_addrtype;
-			}
-			if(address_mode == BCAST && hops_left != 0)
-			{
-				/* Check sequence number if same than last sent/forwarded discard buffer */
-#ifdef HAVE_ROUTING
-				forward_buffer=0;
-				/* Get new buffer for forwarding */
-				forward_buffer = stack_buffer_get(0);
-				if (forward_buffer)
-				{
-					/* Copy original buffer for forwarding */
-					memcpy(forward_buffer, buf, sizeof(buffer_t) + buf->buf_end);
-					forward_buffer->src_sa.addr_type = ADDR_NONE;
-					forward_buffer->dst_sa.addr_type = ADDR_BROADCAST;
-					forward_buffer->from = MODULE_CIPV6;
-					forward_buffer->to = MODULE_NONE;
-					forward_buffer->dir = BUFFER_DOWN;
-					forward_buffer->options.type = BUFFER_DATA;
-#ifdef HAVE_MAC_15_4
-					mac_handle(	forward_buffer);
-#else
-					stack_buffer_push(forward_buffer);
-#endif
-					forward_buffer=0;
-				}
-#endif
-			}
-
-			if(buf)
-			{
-				buf->buf_ptr = (dptr - buf->buf); /*cut header*/
-				buf->from = MODULE_CIPV6;
-				buf->to = MODULE_NONE;
-				stack_buffer_push(buf);
-				buf=0;
-				debug("IP:UP\r\n");
-			}
-		break;
-		case NOT_OWN:/* We are not final destination */
-#ifndef HAVE_NRP
-#ifdef HAVE_ROUTING
-			if(hops_left > 0)
-			{
-				/* Route packet */
-				nanomesh_delivery = nano_mesh_forward(buf->dst_sa.addr_type, buf->dst_sa.address, &route_check );
-				switch (nanomesh_delivery)
-				{
-					case NANOMESH_NO_ROUTE:
-						debug("NR\r\n");
-						ip_broken_link_notify(buf, 1);
-						buf=0;
-						break;
-
-					case NANOMESH_FORWARD:
-						/* Change next-hop address to rf_802_15_4 dest_address */
-						memcpy(buf->dst_sa.address, route_check.next_hop, 10);
-						buf->dst_sa.addr_type = route_check.address_type;
-					case NANOMESH_NEIGHBOUR:
-						buf->src_sa.addr_type = ADDR_NONE;
-						buf->from = MODULE_CIPV6;
-						buf->to = MODULE_NONE;
-						buf->dir = BUFFER_DOWN;
-						stack_buffer_push(buf);
-						buf=0;
-						break;
-					default:
-						debug("IP:Del err\r\n");
-						stack_buffer_free(buf);
-						buf=0;
-						break;
-				}
-			}
-			else
-			{
-				stack_buffer_free(buf);
-				buf=0;
-			}
-#endif /*HAVE_ROUTING*/
-#endif/*HAVE_NRP*/
-		break;
-		case DISCARD:
-			stack_buffer_free(buf);
-			buf=0;
-		break;
-	}
-	/* Discard buffer */
-	if(buf)
-	{
-		debug("Mesh par: dis\r\n");
-		stack_buffer_free(buf);
-		buf=0;
-	}
-}
-
-uint8_t add_own_address(uint8_t *d_ptr);
-
-/**
- * Function build lowpan header / mesh header.
- *
- * \param buf pointer to data
- */
-portCHAR build_lowpan_header(buffer_t *buf)
-{
- 	uint8_t mesh_header ,header_size=0;
-	control_message_t *ptr;
-	uint8_t *dptr;
-	uint8_t i;
-	dptr=0;
-	debug("IP:Build\r\n");
-	mesh_header = MESH_ROUTING_TYPE;
-	header_size = 3;
-	if((buf->from == MODULE_CUDP) && buf->options.lowpan_compressed)
-			header_size++;
-	
-	if(cipv6_pib.use_short_address)
-	{
-		mesh_header |= O_ADDRESSTYPE_16;
-		header_size +=2;
-	}
-	else
-	{
-		mesh_header |= O_ADDRESSTYPE_64;
-		header_size +=8;
-	} 
-
-	/* Check destination address and delivery mode from neighbor table */
-	switch(buf->dst_sa.addr_type)
-	{
-		case ADDR_COORDINATOR:
-			nanomesh_delivery = NANOMESH_NEIGHBOUR;
-			break;
-		
-		case ADDR_BROADCAST:
-			mesh_header |= D_ADDRESSTYPE_16;
-			header_size +=2;
-			nanomesh_delivery = NANOMESH_BROADCAST;
-			break;
-			
-		case ADDR_802_15_4_PAN_SHORT:
-			mesh_header |= D_ADDRESSTYPE_16;
-			header_size +=2;
-			goto mesh_neighbour_check;
-			
-		case ADDR_802_15_4_LONG:
-			buf->dst_sa.addr_type = ADDR_802_15_4_PAN_LONG;			
-		case ADDR_802_15_4_PAN_LONG:
-			mesh_header |= D_ADDRESSTYPE_64;
-			header_size +=8;
-
-		default:
-			mesh_neighbour_check:			
-			/* Check neighbourtable */
-			if(stack_check_broadcast(buf->dst_sa.address, buf->dst_sa.addr_type) == pdTRUE)
-			{
-					nanomesh_delivery = NANOMESH_BROADCAST;
-					if(buf->dst_sa.addr_type==ADDR_802_15_4_PAN_LONG)
-					{
-						header_size -=6;
-						mesh_header &=(~ D_ADDRESSTYPE_64);
-						mesh_header |=D_ADDRESSTYPE_16;
-					}
-			}
-			else
-			{
-#ifdef HAVE_ROUTING
-				nanomesh_delivery = nano_mesh_forward(buf->dst_sa.addr_type, buf->dst_sa.address, &route_check );
-#else
-				nanomesh_delivery = nano_mesh_forward(buf->dst_sa.addr_type, buf->dst_sa.address, NULL );
-#endif
-			}
-			break;
-	}
-	
-	switch (nanomesh_delivery)
-	{
-		case NANOMESH_NO_ROUTE:
-			debug("NR\r\n");
-#ifdef AD_HOC_STATE
-			if(buf->dst_sa.addr_type==ADDR_802_15_4_PAN_LONG)
-			{
-				buf->dst_sa.address[8] = 0xff;
-				buf->dst_sa.address[9] = 0xff;
-			}
-#endif
-		case NANOMESH_NEIGHBOUR:
-			debug("Ne\r\n");
-			header_size = 3;
-			if(buf->options.lowpan_compressed && buf->from == MODULE_CUDP)
-				header_size++;
-			if(stack_buffer_headroom(buf,header_size) == pdFALSE)
-			{
-				ptr = ( control_message_t*) buf->buf;
-				ptr->message.ip_control.message_id = TOO_LONG_PACKET;
-				push_to_app(buf);
-				buf=0;
-				return pdTRUE;
-			}
-			buf->buf_ptr -= header_size; /* lowpan-dispatch+HC1 = header space */
-			dptr = buffer_data_pointer(buf);
-			break;
-
-		case NANOMESH_BROADCAST:
-			debug("BC\r\n");
-			buf->dst_sa.addr_type = ADDR_802_15_4_PAN_SHORT;
-			for(i=0; i<4; i++)
-			{
-				buf->dst_sa.address[i] =0xff;
-			}
-		case NANOMESH_FORWARD:
-			debug("MESH\r\n");
-			if(nanomesh_delivery==NANOMESH_BROADCAST)
-			{
-				header_size +=3;
-#ifdef HAVE_NRP
-				mesh_header |= (GENERAL_HOPLIMIT<<4);
-#else
-#ifdef HAVE_ROUTING
-				if(buf->options.hop_count)
-					mesh_header |= (buf->options.hop_count<<4);
-				else
-					mesh_header |= (1<<4);
-#else
-				mesh_header |= (1<<4);
-#endif/*HAVE_ROUTING*/
-#endif/*HAVE_NRP*/
-			}
-			else
-			{
-				header_size++;		/* Mesh options */
-				mesh_header |= BASIC_HOP_VALUE;
-			}
-
-			if(stack_buffer_headroom(buf,header_size) == pdFALSE)
-			{
-				ptr = ( control_message_t*) buf->buf;
-				ptr->message.ip_control.message_id = TOO_LONG_PACKET;
-				push_to_app(buf);
-				buf=0;
-				return pdTRUE;
-			}
-			buf->buf_ptr -= header_size; /* lowpan-dispatch+HC1 = header space */
-			dptr = buffer_data_pointer(buf);
-			/* Mesh frame type */
-			*dptr++ = mesh_header;
-			/* Build Mesh delivery address field*/
-			/* Originator address */
-			dptr += add_own_address(dptr);
-			if(buf->dst_sa.addr_type == ADDR_802_15_4_PAN_SHORT)
-				dest_length=2;
-			else
-				dest_length=8;
-
-			for(i=0; i<dest_length ;i++)
-			{
-				*dptr++ = buf->dst_sa.address[i];
-			}
-
-			if(nanomesh_delivery == NANOMESH_BROADCAST)
-			{
-				buf->dst_sa.addr_type = ADDR_BROADCAST;
-				buf->src_sa.addr_type = ADDR_NONE;
-				/* Mesh broadcast header type and sequence number */
-				*dptr++ = LOWPAN_BC0;
-				*dptr++ = cipv6_pib.own_brodcast_sqn;
-				update_ip_sqn();
-			}
-			else
-			{
-				/* Change next-hop address to rf_802_15_4 dest_address */
-				memcpy(buf->dst_sa.address, route_check.next_hop, 10);
-				buf->dst_sa.addr_type = route_check.address_type;
-			}
-			break;
-	}
-
-	/* General Lowpan and cIPv6 headers */
-	if(buf)
-	{
-		*dptr++ = LOWPAN_HC1; 	/* LowPan Dispatch	 */
-		/* HC1 encode */
-		if(buf->from == MODULE_ICMP)
-			*dptr++ = IP_HEADER_FOR_ICMP;
-		else
-		{
-			if(buf->options.lowpan_compressed)
-			{
-				*dptr++ = HC1_NEXT_HEADER_COMPRESSED_UDP;
-				*dptr++ = buf->options.lowpan_compressed;
-			}		
-			else 
-				*dptr++ = HC1_NEXT_HEADER_UNCOMPRES_UDP;
-		}
-		*dptr++ = GENERAL_HOPLIMIT;	/* Hop-limit	*/
-		buf->from = MODULE_CIPV6;
-		buf->to = MODULE_NONE;
-		stack_buffer_push(buf);
-		buf=0;
-	}
-	return pdTRUE;
-}
-
 uint8_t add_own_address(uint8_t *d_ptr)
 {
 	uint8_t i;
@@ -774,6 +769,203 @@ void update_ip_sqn(void)
 	if(cipv6_pib.own_brodcast_sqn==0xff) cipv6_pib.own_brodcast_sqn=1;
 	else cipv6_pib.own_brodcast_sqn++;
 }
+
+portCHAR compare_ori_to_own(sockaddr_t *adr)
+{
+	if(adr-> addr_type == ADDR_802_15_4_PAN_LONG)
+	{
+		if(memcmp(adr->address,mac_long.address , 8)==0)
+			return pdTRUE;
+	}
+	else
+	{
+		if(memcmp(adr->address,cipv6_pib.short_address ,2)==0)
+			return pdTRUE;
+	}
+	return pdFALSE;
+}
+
+/**
+ * Function notify for Broken link.
+ *
+ * Function remove allways neighbour info which not answer and if packet is Mesh routing header it will also remove routing info to destination.
+ * Then it check originator address, if address is device own it will notify application.
+   if address is not own it will forward ctrl message to ICMP module which create ICMP error message to originator.
+ * \param buf pointer to data
+ */
+void ip_broken_link_notify(buffer_t *buf, uint8_t no_route_reason)
+{
+	uint8_t i=0, length=0, tmp, *ind;
+	control_message_t *msg;
+	debug("IP:BR\r\n");
+	memcpy(&(namomesh_info.adr),&(buf->dst_sa), sizeof(sockaddr_t) );
+	namomesh_info.lqi = 0;
+	namomesh_info.event = REMOVE_ROUTE;
+	update_neighbour_table(&namomesh_info);
+
+	if(buf->buf[buf->buf_ptr] == IPV6)
+	{
+		i=99;
+	}
+	else
+	{
+		buf->src_sa.addr_type = ADDR_NONE;
+		if((buf->buf[buf->buf_ptr] & LOWPAN_TYPE_BM) ==  MESH_ROUTING_TYPE)
+		{
+			uint8_t mesh_header;
+			ind = (buf->buf + buf->buf_ptr);
+			mesh_header = *ind++;
+			/* Check Originator and Final-destination address */
+			tmp=(mesh_header & MESH_ADDRESSTYPE_BM);
+			if((tmp & O_ADDRESSTYPE_BM) == O_ADDRESSTYPE_16)
+			{
+				buf->src_sa.addr_type = ADDR_802_15_4_PAN_SHORT;
+				length=2;
+			}
+			else
+			{
+				buf->src_sa.addr_type = ADDR_802_15_4_PAN_LONG;
+				length=8;	
+			}
+			for(i=0; i < length; i++)
+			{
+				buf->src_sa.address[i] = *ind++;
+			}
+		
+			if((tmp & D_ADDRESSTYPE_BM) == D_ADDRESSTYPE_16)
+			{
+				buf->dst_sa.addr_type =  ADDR_802_15_4_PAN_SHORT;
+				length=2;
+			}
+			else
+			{
+				buf->dst_sa.addr_type = ADDR_802_15_4_PAN_LONG;
+				length=8;
+			}
+			for(i=0; i < length; i++)
+			{
+				buf->dst_sa.address[i] = *ind++;
+			}
+#ifdef HAVE_ROUTING
+			memcpy(&(namomesh_info.adr),&(buf->dst_sa), sizeof(sockaddr_t) );
+			namomesh_info.lqi = 0;
+			namomesh_info.event = ROUTE_ERR;
+			
+			update_routing_table(&namomesh_info);
+#endif
+		}
+		else
+		{
+			i=99;	/* Destination is neighbour */
+		}
+	}
+
+	buf->options.type = BUFFER_CONTROL;
+	msg = ( control_message_t*) buf->buf;
+	msg->message.ip_control.message_id = BROKEN_LINK;
+	buf->from = MODULE_CIPV6;
+	buf->socket = 0;
+
+	if(no_route_reason)
+		msg->message.ip_control.message.broken_link_detect.reason = NO_ROUTE_TO_DESTINATION_TYPE;
+	else
+		msg->message.ip_control.message.broken_link_detect.reason = BROKEN_LINK_TYPE;
+	
+	if(i==99 || buf->src_sa.addr_type == ADDR_NONE)
+	{
+		debug("--> APP\r\n");
+		push_to_app(buf);
+	}
+	else
+	{
+		if(compare_ori_to_own(&(buf->src_sa)) == pdTRUE)
+		{
+			debug("--> APP\r\n");
+			push_to_app(buf);
+		}
+		else
+		{
+			debug("--> ICMP\r\n");
+			buf->to = MODULE_ICMP;
+			buf->options.handle_type = HANDLE_DEFAULT;
+			buf->dir = BUFFER_UP;
+			stack_buffer_push(buf);
+		}
+	}
+}
+
+uint8_t flood_indexs=0;
+/**
+ * Flooding filter check.
+ *
+ * Function filter broadcast packet and discard if got same packet back from neighbour.
+ *
+ * \param bc_t pointer to broadcast packet information.
+ * \return 1 when packet is new broadcast packet from originator.
+ * \return 0 when function detetct same broadcast sqn number from originator.
+ */
+uint8_t check_broadcast_id(namomesh_info_t *bc_t)
+{
+	uint8_t i,j, length=0;
+	if(bc_t->adr.addr_type == ADDR_802_15_4_PAN_SHORT)
+		length=2;
+	else
+		length=8;
+
+	if(flooding_table.count)
+	{
+		for(i=0; i<FLOODING_INFO_SIZE; i++)
+		{
+			if(flooding_table.info[i].type == bc_t->adr.addr_type)
+			{
+				if(memcmp(flooding_table.info[i].address, bc_t->adr.address, length)==0)
+				{
+					if(flooding_table.info[i].last_sqn != bc_t->last_sqn)
+					{
+						flooding_table.info[i].last_sqn = bc_t->last_sqn;
+						flooding_table.info[i].hop = bc_t->hop;
+						return 1;
+					}
+					else
+					{
+						if(flooding_table.info[i].hop != bc_t->hop)
+						{
+							return 0;
+						}
+						else
+							return 2;
+					}
+				}
+			}
+		}
+		if(flooding_table.count == FLOODING_INFO_SIZE)
+		{
+			flooding_table.info[flood_indexs].type = bc_t->adr.addr_type;
+			//memcpy(flooding_table.info[flood_indexs].address, adr->address, length);
+			for(j=0; j<length;j++)
+			{
+				flooding_table.info[flood_indexs].address[j] = bc_t->adr.address[j];
+			}
+			flooding_table.info[flood_indexs].last_sqn = bc_t->last_sqn;
+			flooding_table.info[flood_indexs].hop = bc_t->hop;
+			flood_indexs++;
+			if(flood_indexs == FLOODING_INFO_SIZE)
+				flood_indexs = 0;
+			return 1;
+		}
+	}
+	i=flooding_table.count;
+	flooding_table.info[i].type = bc_t->adr.addr_type;
+	for(j=0; j<length;j++)
+	{
+		flooding_table.info[i].address[j] = bc_t->adr.address[j];
+	}
+	flooding_table.info[i].last_sqn = bc_t->last_sqn;
+	flooding_table.info[i].hop = bc_t->hop;
+	flooding_table.count++;
+	return 1;
+}
+
 #ifdef SUPPORT_UNCOMP_IPV6
 /**
  * Build IPv6 header.
@@ -803,7 +995,7 @@ portCHAR build_ipv6_header(buffer_t *buf)
 	/* Check deliverymode from neighbour table */
 	if(buf->dst_sa.addr_type != ADDR_BROADCAST && buf->dst_sa.addr_type != ADDR_COORDINATOR)
 	{
-		destination_delivery = check_neighbour_table(buf->dst_sa.addr_type, buf->dst_sa.address);
+		destination_delivery = check_neighbour_table(&(buf->dst_sa));
 		if(destination_delivery==BROADCAST)
 		{
 			buf->dst_sa.addr_type = ADDR_BROADCAST;
@@ -879,10 +1071,12 @@ portCHAR build_ipv6_header(buffer_t *buf)
 			*dptr++ = 0x00;
 		}
 
-		for(i=0; i<8; i++)
+		/*for(i=0; i<8; i++)
 		{
 			*dptr++ = ipv6_address[i];
-		}
+		}*/
+		memcpy(dptr, ipv6_address, 8);
+		dptr += 8;
 	}
 	if(buf->dst_sa.addr_type == ADDR_BROADCAST)
 	{
@@ -973,21 +1167,6 @@ void parse_ipv_header(buffer_t *buf)
 	}
 }
 #endif
-portCHAR compare_ori_to_own(addrtype_t type, address_t address)
-{
-	if(type==ADDR_802_15_4_PAN_LONG)
-	{
-		if(memcmp(address,mac_long.address , 8)==0)
-			return pdTRUE;
-	}
-	else
-	{
-		if(memcmp(address,cipv6_pib.short_address ,2)==0)
-			return pdTRUE;
-	}
-	return pdFALSE;
-}
-
 
 #ifndef NO_FCS
 uint8_t ipv6_in_use = 0;
@@ -1158,174 +1337,3 @@ uint16_t ipv6_fcf(buffer_t *buf, uint8_t next_protocol, uint8_t rx_case)
 	return cksum;
 }
 #endif /*NO_FCS*/
-
-/**
- * Function notify for Broken link.
- *
- * Function remove allways neighbour info which not answer and if packet is Mesh routing header it will also remove routing info to destination.
- * Then it check originator address, if address is device own it will notify application.
-   if address is not own it will forward ctrl message to ICMP module which create ICMP error message to originator.
- * \param buf pointer to data
- */
-void ip_broken_link_notify(buffer_t *buf, uint8_t no_route_reason)
-{
-	uint8_t i, length=0, mesh_header, tmp, *ind;
-	control_message_t *msg;
-	debug("IP:BR\r\n");
-	update_neighbour_table(buf->dst_sa.addr_type, buf->dst_sa.address, -80, 0, REMOVE_NEIGHBOUR);
-	if(buf->buf[buf->buf_ptr] == IPV6)
-	{
-		i=99;
-	}
-	else
-	{
-		buf->src_sa.addr_type = ADDR_NONE;
-		if((buf->buf[buf->buf_ptr] & LOWPAN_TYPE_BM) ==  MESH_ROUTING_TYPE)
-		{
-			ind = (buf->buf + buf->buf_ptr);
-			mesh_header = *ind++;
-			/* Check Originator and Final-destination address */
-			tmp=(mesh_header & MESH_ADDRESSTYPE_BM);
-			if((tmp & O_ADDRESSTYPE_BM) == O_ADDRESSTYPE_16)
-			{
-				buf->src_sa.addr_type = ADDR_802_15_4_PAN_SHORT;
-				length=2;
-			}
-			else
-			{
-				buf->src_sa.addr_type = ADDR_802_15_4_PAN_LONG;
-				length=8;	
-			}
-			for(i=0; i < length; i++)
-			{
-				buf->src_sa.address[i] = *ind++;
-			}
-		
-			if((tmp & D_ADDRESSTYPE_BM) == D_ADDRESSTYPE_16)
-			{
-				buf->dst_sa.addr_type =  ADDR_802_15_4_PAN_SHORT;
-				length=2;
-			}
-			else
-			{
-				buf->dst_sa.addr_type = ADDR_802_15_4_PAN_LONG;
-				length=8;
-			}
-			for(i=0; i < length; i++)
-			{
-				buf->dst_sa.address[i] = *ind++;
-			}
-#ifdef HAVE_ROUTING
-			update_routing_table(buf->dst_sa.addr_type, buf->dst_sa.address, ADDR_NONE, NULL, 0, 0 , REMOVE_ROUTE);
-#endif
-		}
-		else
-		{
-			i=99;	/* Destination is neighbour */
-		}
-	}
-
-	if(length==0 )
-	{
-		if(buf->dst_sa.addr_type ==  ADDR_802_15_4_PAN_SHORT)
-			length=2;
-		else
-			length=8;
-	}
-	buf->options.type = BUFFER_CONTROL;
-	msg = ( control_message_t*) buf->buf;
-	msg->message.ip_control.message_id = BROKEN_LINK;
-	buf->from = MODULE_CIPV6;
-	buf->socket = 0;
-
-	if(no_route_reason)
-		msg->message.ip_control.message.broken_link_detect.reason = NO_ROUTE_TO_DESTINATION_TYPE;
-	else
-		msg->message.ip_control.message.broken_link_detect.reason = BROKEN_LINK_TYPE;
-	
-	msg->message.ip_control.message.broken_link_detect.type = buf->dst_sa.addr_type;
-	memcpy(msg->message.ip_control.message.broken_link_detect.address,buf->dst_sa.address,length);
-
-	if(i==99 || buf->src_sa.addr_type == ADDR_NONE)
-	{
-		//buf->to = MODULE_APP;
-		debug("--> APP\r\n");
-		push_to_app(buf);
-	}
-	else
-	{
-		if(compare_ori_to_own(buf->src_sa.addr_type, buf->src_sa.address) == pdTRUE)
-		{
-			//buf->to = MODULE_APP;
-			debug("--> APP\r\n");
-			push_to_app(buf);
-		}
-		else
-		{
-			debug("--> ICMP\r\n");
-			buf->to = MODULE_ICMP;
-			buf->options.handle_type = HANDLE_DEFAULT;
-			buf->dir = BUFFER_UP;
-			stack_buffer_push(buf);
-		}
-	}
-	/*if(buf->to == MODULE_APP)
-	{
-		debug("--> APP\r\n");
-		push_to_app(buf);
-	}
-	else
-	{
-		debug("--> ICMP\r\n");
-		buf->options.handle_type = HANDLE_DEFAULT;
-		buf->dir = BUFFER_UP;
-		stack_buffer_push(buf);
-	}*/
-}
-
-uint8_t flood_indexs=0;
-
-uint8_t check_broadcast_id(addrtype_t addrtype, address_t address, uint8_t sqn)
-{
-	uint8_t i, length=0;
-	if(addrtype == ADDR_802_15_4_PAN_SHORT)
-		length=2;
-	else
-		length=8;
-
-	if(flooding_table.count)
-	{
-		for(i=0; i<FLOODING_INFO_SIZE; i++)
-		{
-			if(flooding_table.info[i].type == addrtype)
-			{
-				if(memcmp(flooding_table.info[i].address, address, length)==0)
-				{
-					if(flooding_table.info[i].last_sqn != sqn)
-					{
-						flooding_table.info[i].last_sqn = sqn;
-						return 1;
-					}
-					else
-						return 0;
-				}
-			}
-		}
-		if(flooding_table.count == FLOODING_INFO_SIZE)
-		{
-			flooding_table.info[flood_indexs].type = addrtype;
-			memcpy(flooding_table.info[flood_indexs].address, address, length);
-			flooding_table.info[flood_indexs].last_sqn = sqn;
-			flood_indexs++;
-			if(flood_indexs == 8)
-				flood_indexs = 0;
-			return 1;
-		}
-	}
-	i=flooding_table.count;
-	flooding_table.info[i].type = addrtype;
-	memcpy(flooding_table.info[i].address, address, length);
-	flooding_table.info[i].last_sqn = sqn;
-	flooding_table.count++;
-	return 1;
-}

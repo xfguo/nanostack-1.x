@@ -47,9 +47,24 @@ typedef enum rf_address_mode_t
 	RF_DECODER_COORDINATOR,
 	RF_SOFTACK_MONITOR,
 	RF_MONITOR,
+	RF_SOFTACK_CLIENT,
 	RF_DECODER_ON
 }rf_address_mode_t;
-
+typedef enum
+{
+	MAC_NONE = 0,
+	MAC_RECEIVE=1,
+	MAC_ACK_RX=2,
+	MAC_TIMER_ACK=3,
+	MAC_TIMER_CCA=4,
+	MAC_TRANSMIT=5,
+	MAC_CONTROL=6,
+	MAC_TIMER_NONE=7,
+	MAC_LOOP=8,
+	MAC_ED_SCAN=9,
+	MAC_RSSI_CHECK=10,
+	MAC_GW_DIS = 11
+}mac_event_t;
 /*CSP command set*/
 #define SSTOP		0xDF
 /*this is not a real command but a way of having rf_command
@@ -74,14 +89,14 @@ typedef enum rf_address_mode_t
 #define ISRFOFF		0xE5
 #define ISFLUSHRX	0xE6
 #define ISFLUSHTX	0xE7
-#define ISACK			0xE8
+#define ISACK		0xE8
 #define ISACKPEND	0xE9
 
 #define ISSTOP		0xFF
 #define ISSTART		0xFE
 
-#define MAC_IFS (1200/32)
-#define PLATFORM_TIMER_DIV 32
+#define MAC_IFS (1200/128)
+#define PLATFORM_TIMER_DIV 128
 
 extern portCHAR rf_init(void);
 
@@ -102,6 +117,10 @@ extern void rf_ISR( void ) interrupt (RF_VECTOR);
 extern void rf_error_ISR( void ) interrupt (RFERR_VECTOR);
 extern portCHAR mac_set_channel(uint8_t new_channel);
 extern uint8_t mac_current_channel(void);
+extern portCHAR mac_mem_alloc(void);
+extern void mac_start_ed_scan(void);
+extern void mac_gw_discover(void);
+
 #ifdef HAVE_RF_DMA
 void rf_dma_callback_isr(void);
 #endif

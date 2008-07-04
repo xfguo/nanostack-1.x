@@ -16,3 +16,4 @@ BANK2 cIPv6.c
 BANK2 cUDP.c
 BANK3 debug.c
 BANK3 icmp.c
+BANK3 nano_mesh.c

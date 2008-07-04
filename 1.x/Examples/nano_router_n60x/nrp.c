@@ -87,6 +87,8 @@ extern portCHAR nrp_check( buffer_t *buf );
 #define NRP_FILTERS 4
 #endif
 
+uint8_t nrp_router_mode;
+uint8_t nrp_router_advertise_period;
 
 int8_t nrp_init_done = -1;
 
@@ -101,6 +103,8 @@ sockaddr_t nrp_filter_address[NRP_FILTERS];
 void nrp_filter_init(void);
 portCHAR nrp_filter_match(buffer_t *buf);
 int8_t nrp_filter_add(module_id_t module, sockaddr_t *sa);
+
+void nrp_channel_notify(void);
 
 
 buffer_t *nrp_tx[STACK_BUFFERS_MAX];
@@ -133,12 +137,23 @@ void nrp_tx_push(buffer_t *b)
 
 void nrp_tx_add(buffer_t *b)
 {
-	uint8_t tmp = nrp_tx_wr;
+	uint8_t tmp;
 	
+	{
+		int8_t size = nrp_tx_wr - nrp_tx_rd;
+		if (size < 0) size += STACK_BUFFERS_MAX;
+		if (size > (STACK_BUFFERS_MAX/2))
+		{
+			stack_buffer_free(b);
+			return;
+		}
+	}
+	tmp = nrp_tx_wr;
 	nrp_tx[tmp++] = b;
 
 	if (tmp >= STACK_BUFFERS_MAX) tmp = 0;
 	nrp_tx_wr = tmp;
+	
 }
 
 xTaskHandle nrp_task_handle;
@@ -152,7 +167,11 @@ xTaskHandle nrp_task_handle;
  */
 portCHAR nrp_init(buffer_t *buf)
 {
-	buf;		
+	buf;
+	
+	nrp_router_advertise_period = 0;
+	nrp_router_mode = 0;
+	
 	if (nrp_init_done > 0) return pdTRUE;
 
 	nrp_filter_init();
@@ -259,9 +278,10 @@ void nrp_control(buffer_t *buf);
  */
 void vnrp_task( void *pvParameters )
 {
-  int16_t byte;
+	int16_t byte;
 	uint8_t nrp_rx_state;
-	uint8_t idle_count = 0;
+	uint16_t idle_count = 0;
+	uint16_t wait_time = 8*portTICK_RATE_MS;
 	
 	pvParameters;
 
@@ -278,9 +298,10 @@ void vnrp_task( void *pvParameters )
 			
 	for (;;)
 	{
-	  byte = nrp_uart_get_blocking(10);
+		byte = nrp_uart_get_blocking(wait_time);
 		if (byte != -1)
 		{
+			wait_time = 4*portTICK_RATE_MS;
 			switch (nrp_rx_state)
 			{
 				case 0: /*idle*/
@@ -398,7 +419,9 @@ parse_tag:
 		}	/*end data in*/
 		else
 		{	/*no data received*/
-			if (idle_count++ > 20)
+			idle_count += wait_time;
+			wait_time = 8*portTICK_RATE_MS;
+			if (idle_count > 20*portTICK_RATE_MS)
 			{
 				idle_count = 0;
 				if (nrp_rx_state != 0)
@@ -464,6 +487,7 @@ void nrp_tag_parse(void)
 		conf_tag = nrp_tag_id & 0x7F;
 		switch (conf_tag)
 		{
+			case NRPC_ROUTER_ADVERTISE:
 			case NRPC_SUBSCRIBE:
 			case NRPC_RF_ID:
 			case NRPC_PROTOCOL_ID:
@@ -532,7 +556,8 @@ void nrp_tag_parse(void)
 					case NRP_PROTO_802_15_4:
 #ifdef HAVE_802_15_4_RAW
 						nrp_rx_buffer->to = MODULE_802_15_4_RAW;
-#else
+#endif
+#ifdef HAVE_RF_802_15_4
 						nrp_rx_buffer->to = MODULE_RF_802_15_4;
 #endif
 #ifdef HAVE_MAC_15_4
@@ -651,7 +676,7 @@ void nrp_control(buffer_t *buf)
 		case NRPC_RESET:
 			debug("Reset");
 			nrp_filter_init();
-			rf_channel_set(RF_DEFAULT_CHANNEL);
+			//rf_channel_set(RF_DEFAULT_CHANNEL);
 			nrp_uart_put((nrp_config_tag_t)NRPC_RESET | 0x80);	/*tag*/
 			nrp_uart_put(0);	/*set*/
 			nrp_uart_put(1);	/*length*/
@@ -678,7 +703,8 @@ void nrp_control(buffer_t *buf)
 					case NRP_PROTO_802_15_4:
 #ifdef HAVE_802_15_4_RAW
 						module = MODULE_802_15_4_RAW;
-#else
+#endif
+#ifdef HAVE_RF_802_15_4
 						module = MODULE_RF_802_15_4;
 #endif
 #ifdef HAVE_MAC_15_4
@@ -735,7 +761,22 @@ void nrp_control(buffer_t *buf)
 				nrp_uart_put(mac_current_channel());
 			}
 			break;
-						
+			
+		case NRPC_ROUTER_ADVERTISE:
+			{
+				uint8_t tmp;
+				
+				tmp = buffer_pull_uint8(buf);
+				nrp_router_mode = ((tmp>>7)^1);
+				nrp_router_advertise_period = (tmp & 0x3F);
+				
+				nrp_uart_put((nrp_config_tag_t)NRPC_ROUTER_ADVERTISE | 0x80);	/*tag*/
+				nrp_uart_put(0);	/*set*/
+				nrp_uart_put(1);	/*length*/
+				nrp_uart_put(tmp);
+			}
+			break;
+			
 		case NRPC_MAC_GET:
 			debug("MAC");
 			{
@@ -763,6 +804,17 @@ void nrp_control(buffer_t *buf)
 	nrp_uart_launch();
 }
 
+void nrp_channel_notify(void)
+{
+	buffer_t *buf_out = stack_buffer_get(0);
+	if (buf_out)
+	{
+		buf_out->options.type = BUFFER_CONTROL;
+		buffer_push_uint8(buf_out, NRPC_CHANNEL_SET);
+		buffer_push_uint8(buf_out, 0);
+		nrp_tx_add(buf_out);
+	}
+}
 
 void nrp_transmit(buffer_t *buf)
 {
@@ -780,7 +832,8 @@ void nrp_transmit(buffer_t *buf)
 	{
 #ifdef HAVE_802_15_4_RAW
 		case MODULE_802_15_4_RAW:
-#else
+#endif
+#ifdef HAVE_RF_802_15_4
 		case MODULE_RF_802_15_4:
 #endif
 		case MODULE_MAC_15_4:
@@ -790,6 +843,7 @@ void nrp_transmit(buffer_t *buf)
 			nrp_uart_put(NRP_PROTO_802_15_4);	/*Raw MAC data*/
 			break;
 
+#ifdef HAVE_NUDP
 		case MODULE_NUDP:
 			nrp_uart_put(tag);
 			nrp_uart_put(0);	/*set*/
@@ -806,7 +860,8 @@ void nrp_transmit(buffer_t *buf)
 			nrp_uart_put(buf->dst_sa.port >> 8);	/*NUDP port*/
 			nrp_uart_put(buf->dst_sa.port);	/*NUDP port*/
 			break;
-
+#endif
+			
 #ifdef HAVE_CUDP
 #ifdef HAVE_ICMP
 		case MODULE_ICMP:
@@ -822,6 +877,7 @@ void nrp_transmit(buffer_t *buf)
 			nrp_uart_put(*ptr++);	/*type*/
 			nrp_uart_put(*ptr);				/*code*/
 			buf->buf_ptr += 4;
+			if (buf->buf_end < buf->buf_ptr) buf->buf_end = buf->buf_ptr;
 			break;		
 #endif
 		case MODULE_CUDP:
@@ -860,6 +916,14 @@ void nrp_transmit(buffer_t *buf)
 	{
 		nrp_uart_put(*ptr++);
 		tmp_16--;
+	}
+	if((buf->from == MODULE_CUDP) || (buf->from == MODULE_ICMP))
+	{
+		tag = NRP_HOPS;
+		nrp_uart_put(tag);
+		nrp_uart_put(0);	/*set*/
+		nrp_uart_put(1);	/*length*/
+		nrp_uart_put(buf->options.hop_count);		
 	}
 	tmp_16 = (uint16_t) buf->options.rf_dbm;
 	tag = NRP_DBM;

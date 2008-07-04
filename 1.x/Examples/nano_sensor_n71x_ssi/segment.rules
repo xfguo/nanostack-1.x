@@ -16,3 +16,4 @@ BANK2 stats.c
 BANK3 icmp.c
 BANK3 nrp.c
 BANK3 protocol_lib.c
+BANK3 nano_mesh.c

@@ -74,7 +74,8 @@ int8_t timer_mac_launch(uint8_t ticks)
 	T4CCTL0 = 0;
 	T4CC0 = ticks;
 	IEN1_T4IE = 1;
-	T4CTL = 0xA0 + 0x10 + 0x08 + 0x04 + 0x02;
+	T4CTL = 0xA0 + 0x10 + 0x08 + 0x04 + 0x02; //divider 32
+	//T4CTL = 0x40 + 0x10 + 0x08 + 0x04 + 0x02;  //divider 4
 	return 0;
 }
 
@@ -122,27 +123,35 @@ extern void mac_timer_callback(void);
 
 void timer_1_ISR( void ) interrupt (T1_VECTOR)
 {
+	IEN0_EA = 0;
 	T1CTL = 0;
+	IEN0_EA = 1;
 }
 
 void timer_2_ISR( void ) interrupt (T2_VECTOR)
 {
+	IEN0_EA = 0;
 	T2CNF &= ~OFCMPIF;
 	T2CNF = 0;
+	IEN0_EA = 1;
 }
 
 void timer_3_ISR( void ) interrupt (T3_VECTOR)
 {
+	IEN0_EA = 0;
 	TIMIF = ~(T3CH1IF | T3CH0IF| T3OVFIF) & 0x3F;
 	T3CTL = 0;
 	rf_timer_callback();
+	IEN0_EA = 1;
 }
 
 void timer_4_ISR( void ) interrupt (T4_VECTOR)
 {
+	EA = 0;
 	TIMIF = ~(T4CH1IF | T4CH0IF| T4OVFIF) & 0x3F;
 	T4CTL = 0;
 #ifdef HAVE_MAC_15_4
 	mac_timer_callback();
 #endif
+	EA = 1;
 }

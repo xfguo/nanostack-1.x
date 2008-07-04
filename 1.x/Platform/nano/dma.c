@@ -231,6 +231,10 @@ extern void nrp_uart_rx_dma_callback(void);
 #ifdef NRP_UART_DMA_TX
 extern void nrp_uart_tx_dma_callback(void);
 #endif
+#ifdef SPI_DMA_RX
+extern void spi_rx_dma_callback(void);
+#endif
+
 
 /**
  * DMA interrupt service routine.
@@ -242,12 +246,15 @@ void dma_ISR( void ) interrupt (DMA_VECTOR)
 	portBASE_TYPE prev_task = pdFALSE;
 	uint8_t i;
 #endif
+	EA=0;
 	
 #ifdef HAVE_RF_DMA
 	if ((DMAIRQ & 1) != 0)
 	{
 		DMAIRQ &= ~1;
+		DMAARM=0x81;
 		rf_dma_callback_isr();
+		//DMAARM=1;
 	}
 #endif
 #ifdef NRP_UART_DMA_RX
@@ -257,6 +264,17 @@ void dma_ISR( void ) interrupt (DMA_VECTOR)
 		nrp_uart_rx_dma_callback();
 	}		
 #endif
+#ifdef SPI_DMA_RX
+	if ((DMAIRQ & 0x08) != 0)
+	{
+		DMAIRQ &= ~(1 << 3);
+		spi_rx_dma_callback();
+	}		
+#endif
+
+
+
+
 #ifdef NRP_UART_DMA_TX		
 	if ((DMAIRQ & 0x10) != 0)
 	{
@@ -284,5 +302,6 @@ void dma_ISR( void ) interrupt (DMA_VECTOR)
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	EA=1;
 }
 

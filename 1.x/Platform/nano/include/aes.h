@@ -27,14 +27,14 @@
 */
 
 
-#ifndef _INTTYPES_H
-#define _INTTYPES_H
+#ifndef _AES_H
+#define _AES_H
 
-typedef unsigned char uint8_t;
-typedef signed char int8_t;
-typedef unsigned short int uint16_t;
-typedef unsigned long int uint32_t;
-typedef signed long int int32_t;
-typedef signed short int int16_t;
-
+#ifdef HAVE_AES
+extern void aes_init(uint8_t *key, uint8_t *iv);
+extern void aes_crypt(uint8_t mode, buffer_t *buffer);
+#define aes_encrypt(x) aes_crypt(0, x)
+#define aes_decrypt(x) aes_crypt(1, x)
 #endif
+
+#endif /*_AES_H*/

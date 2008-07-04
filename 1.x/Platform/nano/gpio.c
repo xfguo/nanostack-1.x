@@ -96,7 +96,6 @@ portCHAR gpio0_irq_allocate(uint8_t pin, void (*isr)(void), uint8_t edge)
 {
 	uint8_t mask = (1 << pin);
 	mask &= 0x0F;
-		
 	if (mask)
 	{
 		if (vPort0_ISRs[pin] == 0) vPort0_ISRs[pin] = isr;
@@ -154,7 +153,7 @@ portCHAR gpio1_irq_allocate(uint8_t pin, void (*isr)(void), uint8_t edge)
 			}
 			else
 			{
-				PICTL &= P1ICON;
+				PICTL &= ~P1ICON;
 			}
 			P1IFG &= ~mask;
 			P1IEN |= mask;
@@ -172,6 +171,7 @@ portCHAR gpio1_irq_allocate(uint8_t pin, void (*isr)(void), uint8_t edge)
  */
 void vPort0_ISR( void ) interrupt (P0INT_VECTOR)
 {
+	EA = 0;
 	{
 		uint8_t i,mask;
 		mask = 1;
@@ -193,6 +193,7 @@ void vPort0_ISR( void ) interrupt (P0INT_VECTOR)
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	EA = 1;
 }
  
 /**
@@ -202,6 +203,7 @@ void vPort0_ISR( void ) interrupt (P0INT_VECTOR)
  */
 void vPort1_ISR( void ) interrupt (P1INT_VECTOR)
 {
+	EA = 0;
 	{
 		uint8_t i,mask;
 		mask = 1;
@@ -223,6 +225,7 @@ void vPort1_ISR( void ) interrupt (P1INT_VECTOR)
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	EA = 1;
 }
 
 #endif /*HAVE_GPIO*/

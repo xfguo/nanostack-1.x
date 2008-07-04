@@ -66,9 +66,9 @@
 #define D_ADDRESSTYPE_16	0x08
 #define D_ADDRESSTYPE_64	0x00
 
-#define BASIC_HOP_VALUE			0x40
-#define FLOODING_HOP_VALUE		0xA0
-#define GENERAL_HOPLIMIT		0x16
+#define BASIC_HOP_VALUE			0x30
+#define FLOODING_HOP_VALUE		0x30
+#define GENERAL_HOPLIMIT		0x03
 #define PRE_MESH_HEADER	(MESH_ROUTING_TYPE | O_ADDRESSTYPE_64 | D_ADDRESSTYPE_64 )
 
 #define FRAGMENT_OPTIONS_BM		0x04
@@ -130,20 +130,19 @@ typedef struct
 	uint8_t use_full_compress;			/*!< Show which compressed mode is used. */
 }cipv6_ib_t;
 
-extern portCHAR build_lowpan_header(buffer_t *buf);
-extern void parse_lowpan_packet(buffer_t *buf, uint8_t packet_type);
 extern void update_ip_sqn(void);
-extern portCHAR build_ipv6_header(buffer_t *buf);
-extern void parse_ipv_header(buffer_t *buf);
 extern void add_fcf(buffer_t *buf );
-
-extern portCHAR compare_ori_to_own(addrtype_t type, address_t address);
+extern portCHAR compare_ori_to_own(sockaddr_t *adr);
 extern void ip_address_setup( uint8_t short_addr, uint8_t *ptr);
+
 #ifndef NO_FCS
 extern uint16_t ipv6_fcf(buffer_t *buf, uint8_t next_protocol, uint8_t rx_case);
 #endif /*NO_FCS*/
 extern void ip_broken_link_notify(buffer_t *buf, uint8_t no_route_reason);
-#ifdef HAVE_ROUTING
-extern void route_packet(buffer_t *buf, address_t ori_address, addrtype_t o_addrtype, uint8_t mesh_header, uint8_t hops_left, uint8_t ind);
-#endif
+#ifdef SUPPORT_UNCOMP_IPV6
+extern portCHAR build_ipv6_header(buffer_t *buf);
+extern void parse_ipv_header(buffer_t *buf);
+#endif /* SUPPORT_UNCOMP_IPV6 */
+
 #endif /*_CIPV6_H*/
+

@@ -10,6 +10,9 @@ clean:
 	for i in $(SUBDIRS); do \
 		cd $$i; make clean ; make clean-deps; cd ..; done
 
+clean-deps:
+	@echo "Clean complete."
+
 show-examples:
 	@echo -n "Available examples: "
 	@echo $(SUBDIRS)

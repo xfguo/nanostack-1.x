@@ -64,6 +64,8 @@ struct nRdconfig_t {
 
 	int serialbufsize;		/**< How many packets should the serial server sendbuffer have space for. Default: 20 */
 	int protocol;					/**< Protocol to register */
+	int channel;			/**< Radio channel */
+	unsigned int gw_adv_period;	/**< GW advertisement period in ms */
 };
 
 /** Struct for statistics.

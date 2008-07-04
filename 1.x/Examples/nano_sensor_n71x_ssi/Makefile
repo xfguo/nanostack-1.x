@@ -10,7 +10,7 @@
 #
 # make program = Download the hex file to the device
 
-APP=nano_example_n1xx
+APP=nano_sensor_n71x_ssi
 
 #Directories
 SOURCE_DIR = ../../FreeRTOS/Source
@@ -31,11 +31,11 @@ OPT =
 #OPT = s
 
 # C sources
-SRC +=
+SRC += $(PLATFORM_DIR)/adc.c 
 # $(PLATFORM_DIR)/uart.c 
 
 # Additional build options
-#CFLAGS += -DHAVE_RF_DUAL_LED -DHAVE_RF_ERROR
+#CFLAGS += -DCC2430_EM
 
 # Assembler source files
 ASRC += 

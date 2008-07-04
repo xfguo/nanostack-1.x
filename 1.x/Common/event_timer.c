@@ -48,6 +48,10 @@
 #ifndef HAVE_EVENT_TIMERS
 #define HAVE_EVENT_TIMERS 8
 #endif
+#if (configUSE_TICK_HOOK == 1)
+#else
+#error "Event timers need configUSE_TICK_HOOK = 1"
+#endif
 
 void vApplicationTickHook(void);
 

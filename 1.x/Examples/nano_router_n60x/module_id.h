@@ -27,14 +27,18 @@
 */
 
 
-#ifndef _INTTYPES_H
-#define _INTTYPES_H
+#ifndef _MODULE_ID_H
+#define _MODULE_ID_H
+/* module_id.h generated */
 
-typedef unsigned char uint8_t;
-typedef signed char int8_t;
-typedef unsigned short int uint16_t;
-typedef unsigned long int uint32_t;
-typedef signed long int int32_t;
-typedef signed short int int16_t;
-
-#endif
+typedef enum { MODULE_NONE = 0,
+MODULE_CIPV6,
+MODULE_CUDP,
+MODULE_ICMP,
+MODULE_MAC_15_4,
+MODULE_NANOMESH,
+MODULE_NRP,
+MODULE_SSI,
+MODULE_APP,
+MODULE_MAX } module_id_t;
+#endif  /*_MODULE_ID_H*/

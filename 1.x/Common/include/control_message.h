@@ -158,49 +158,6 @@ typedef struct
 	}message;						/*!< Name of the message union  */
 } control_message_t;
 
-/** network manager modules state enumeration */
-typedef enum
-{
-	CORD_STATE		,		/*!< Coordinator state which handles received mac-command like assocation req etc. */		
-	CLIENT_STATE  		,	/*!< Client state: functions for superframe-state. */
-    ROUTER_STATE,			/*!< Router state:not ready with this release. */	
-	NWK_DISCOVER_STATE	,	/*!< Discover state: module waiting response for active-scan. */	
-	NWK_FORMATION_STATE	,	/*!< Formation state: module waiting response for ed-scan. */	
-	NWK_ASSOC_STATE			/*!< Association state: module waiting response for association request. */	
-}nwk_manager_state_t;
-
-/** child list */
-typedef struct
-{
-	uint8_t 	short_address[2];		/*!< Child allocated nwk_address. */
-	uint8_t		long_address[8];		/*!< Child long address. */
-	uint8_t		cap_info;				/*!< MAC-capability info. */
-}child_list_t;
-
-/** Parent info */
-typedef struct
-{
-	uint8_t 	short_address[2];		/*!< Coordinators short address. */
-	uint8_t		long_address[8];		/*!< Coordinators long address. */
-	uint8_t		address_type;			/*!< Coordinators address type. */ 
-	uint8_t		pan_id[2];				/*!< PAN-id      */
-	uint8_t		channel;				/*!< PAN's logical channel. */ 
-	uint8_t		beacon_order;			/*!< PAN Beacon order. */ 
-	uint8_t		superframe_order;		/*!< PAN Superframe order. */ 
-	uint8_t		assoc_status;			/*!< Assoc status with coordinators. */
-}parent_info_t;
-
-/** network manager modules information base */
-typedef struct
-{
-#ifdef MAC_FFD
-	uint8_t 	child_count;		/*!< Child count. */
-	uint8_t     pan_id[2];
-#else
-	parent_info_t 	parent_info;		/*!< Parent Info */
-#endif
-}nwk_manager_pib_t;
-
 extern ip_control_id_t parse_event_message(buffer_t *buf);
 
 #endif /*CONTROL_MESSAGE_H*/

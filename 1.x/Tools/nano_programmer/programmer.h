@@ -29,6 +29,13 @@
 
 #define PROGRAMMER_VERSION "v1.3"
 
+typedef enum
+{
+	PAGE_SDCC,
+	PAGE_LINEAR,
+	PAGE_UNDEFINED
+}page_mode_t;
+
 typedef struct {
 #ifdef PLATFORM_WINDOWS
 	int device;
@@ -40,6 +47,7 @@ typedef struct {
 	int action;
 	char ihex_file[128];
 	unsigned char write_mac[8];
+	page_mode_t page_mode;
 }conf_opts_t;
 
 enum target { UNDEFINED, VERSION, CDI };

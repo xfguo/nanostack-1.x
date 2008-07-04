@@ -99,7 +99,6 @@ extern __xdata __at (0xFD58) volatile_ram2[423];*/
 #define configIDLE_SHOULD_YIELD		0
 
 /* Version 4.0.x configuration */
-#define configUSE_TICK_HOOK 1
 
 #define configUSE_CO_ROUTINES 0
 #define configMAX_CO_ROUTINE_PRIORITIES 1

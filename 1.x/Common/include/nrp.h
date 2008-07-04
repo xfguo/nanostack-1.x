@@ -75,7 +75,8 @@ typedef enum
 	NRP_SRC_PORT = 0x04,
 	NRP_DST_PORT = 0x05,
 	NRP_DBM = 0x06,
-	NRP_SEQ = 0x07
+	NRP_SEQ = 0x07,
+	NRP_HOPS = 0x08
 }nrp_data_tag_t;
 
 typedef enum
@@ -86,7 +87,8 @@ typedef enum
 	NRPC_SUBSCRIBE = 0x03,
 	NRPC_RESET = 0x07,
 	NRPC_CHANNEL_SET = 0x10,
-	NRPC_MAC_GET = 0x11
+	NRPC_MAC_GET = 0x11,
+	NRPC_ROUTER_ADVERTISE = 0x20
 }nrp_config_tag_t;
 
 typedef enum

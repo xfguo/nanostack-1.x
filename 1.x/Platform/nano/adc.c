@@ -81,7 +81,6 @@ int8_t adc_convert_single(adc_input_t source, adc_ref_t ref, adc_res_t resolutio
 	{	/*differential inputs*/
 		ADCCFG = (3 << ((source-8)*2));
 	}
-	else ADCCFG = 0;
 	
 	ADCCON2 = ref | resolution | source;
 	ADCCON1 = ADST | (ADSTS1|ADSTS0) /*| (ADCCON1 & (ADRCTRL1|ADRCTRL0))*/ | 0x0C | 3;

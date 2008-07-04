@@ -95,32 +95,35 @@ extern portCHAR stack_init(void);
 extern start_status_t stack_start(stack_init_t  *stack_parameters);
 extern buffer_t * waiting_stack_event(uint16_t time);
 extern stack_event_t open_stack_event_bus(void);
+extern portCHAR stack_buffer_add(buffer_t *b);
+extern buffer_t *stack_buffer_pull(void);
 
 extern buffer_t* stack_buffer_get ( portTickType blocktime );
-extern void stack_buffer_free ( buffer_t *b );
+extern portCHAR stack_buffer_free ( buffer_t *b );
 extern portCHAR stack_buffer_push( buffer_t * b);
 extern portCHAR stack_buffer_headroom( buffer_t * b, uint16_t size);
-extern uint8_t * stack_insert_address_to_buffer(uint8_t *dptr, addrtype_t type, address_t address);
+extern uint8_t * stack_insert_address_to_buffer(uint8_t *dptr, addrtype_t type, uint8_t *address);
 extern void cudp_compress_mode( uint8_t mode );
 extern void cipv6_compress_mode( uint8_t mode );
 extern void nwk_manager_set_pan_id(uint8_t *pointer);
-extern portCHAR stack_check_broadcast(address_t address, addrtype_t type);
+extern portCHAR stack_check_broadcast(uint8_t *address, addrtype_t type);
 
 extern portCHAR udp_echo(sockaddr_t *dst, discover_res_t  *result_ptr);
 extern portCHAR ping(sockaddr_t *dst , discover_res_t  *result_ptr);
 extern void push_to_app(buffer_t *buf);
 extern portCHAR parse_echo_response(buffer_t *buf);
 extern void stop_ping(void);
-
-extern void nwk_manager_launch(void);
-extern void scan_network(void);
-
 extern portCHAR gw_discover(void);
 extern portCHAR gw_advertisment(void);
+
+#if 0
+extern void nwk_manager_launch(void);
+extern void scan_network(void);
 extern portCHAR remove_gw_info(sockaddr_t *adr);
 extern portCHAR update_gw_info_ttl(void);
 extern portCHAR select_best_gw(sockaddr_t *adr);
 extern portCHAR gw_table_update(buffer_t *buf);
+#endif
 typedef struct event_t
 {
 	void (*process)(void *param);
@@ -129,7 +132,9 @@ typedef struct event_t
 
 extern xQueueHandle events; 
 extern uint8_t stack_number_get(void);
-
+#ifdef STACK_RING_BUFFER_MODE
+extern int8_t stack_buffer_count(void);
+#endif
 extern portCHAR stack_compare_address(sockaddr_t *a1, sockaddr_t *a2);
 #ifdef HAVE_DYNAMIC_BUFFERS
 buffer_t* stack_buffer_allocate( uint8_t size );

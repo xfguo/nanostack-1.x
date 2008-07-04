@@ -33,7 +33,7 @@
  * \brief Protocol stack main module.
  *
  *  Protocol stack main module: handling of the buffer/event queue,
- *  buffer management
+ *  buffer management, stack event poll.
  *   
  */
 
@@ -57,6 +57,7 @@
 
 #include "control_message.h"
 #include "rf.h"
+#include "gpio.h"
 /*
 #ifndef STACK_TASK_SIZE
 #ifdef SDCC_CC2430
@@ -67,6 +68,7 @@
 #endif
 */
 #ifndef STACK_PRIORITY
+
 #define STACK_PRIORITY (tskIDLE_PRIORITY + 2)
 #endif
 
@@ -76,15 +78,23 @@
 
 #ifndef STACK_BUFFERS_MIN
 #define STACK_BUFFERS_MIN 4
-#endif 
+#endif
+
+#define STACK_RING_BUFFER_SIZE  ( STACK_BUFFERS_MAX + 1 )
 
 /** Common variables */
-xQueueHandle     buffers; 
-xQueueHandle     events = 0; 
+#ifndef STACK_RING_BUFFER_MODE
+xQueueHandle     buffers;
+#else
+buffer_t *stack_buffer_pool[STACK_RING_BUFFER_SIZE];
+volatile uint8_t stack_buffer_wr, stack_buffer_rd;
+#endif 
 
+xQueueHandle     events = 0;
+stack_event_t event_queue = 0;
+ 
 extern socket_t  sockets[];
 extern module_t modules[];
-extern nwk_manager_state_t nwk_state;
 extern sockaddr_t mac_long;
 
 uint8_t n_buffers;
@@ -233,6 +243,80 @@ void stack_buffer(buffer_t *b);
 
 void stack_module_call(uint8_t stack_id, uint8_t layer, buffer_t *b);
 portCHAR stack_module_check(uint8_t stack_id, uint8_t layer, buffer_t *b);
+extern xTaskHandle mac_task_handle;
+xTaskHandle core_handle;
+#ifdef MALLFORMED_HEADERS
+uint8_t mallformed_headers_cnt=0;
+#endif
+#ifdef STACK_RING_BUFFER_MODE
+
+
+
+int8_t stack_buffer_count(void)
+{
+	int8_t size = stack_buffer_wr - stack_buffer_rd;
+	if (size < 0) size += STACK_BUFFERS_MAX;
+	return size;
+}
+
+/**
+ *  Free buffer in the inrerrupt action.
+ * 
+ *  Use only in the interrupt and very carefully (STACK_RING_BUFFER_MODE enabled by default)
+ *
+ *	\param b  pointer to buffer dont give 0 pointer
+ *
+ *  \return	pdFALSE, when buffer pool full
+ *  \return	pdTRUE, when buffer free ok.
+ */
+portCHAR stack_buffer_add(buffer_t *b)
+{
+	uint8_t tmp;
+	if(b == 0)
+	{
+		return pdFALSE;	
+	}
+	tmp = stack_buffer_wr;
+	tmp++;
+
+	if(tmp >= STACK_RING_BUFFER_SIZE)
+	{
+		tmp=0;
+	}
+	if(tmp != stack_buffer_rd)
+	{
+		stack_buffer_pool[stack_buffer_wr] = b;
+		stack_buffer_wr = tmp;
+	}
+	else
+	{//Buffer full, err
+		return pdFALSE;
+	}
+	return pdTRUE;
+}
+/**
+ *  Get buffer in the inrerrupt action.
+ * 
+ *  Use only in the interrupt (STACK_RING_BUFFER_MODE enabled by default)
+ *
+ *
+ *  \return	0 when no buffers available
+ *  \return	pointer to buffer
+ */
+buffer_t *stack_buffer_pull(void)
+{
+	buffer_t *b;
+	uint8_t tmp = stack_buffer_rd;
+	
+	if (tmp == stack_buffer_wr) return 0;
+	b = stack_buffer_pool[tmp];
+	stack_buffer_pool[tmp++] = 0;
+	if (tmp >= STACK_RING_BUFFER_SIZE) tmp = 0;
+	stack_buffer_rd = tmp;
+	
+	return b;
+}
+#endif
 
 /**
  * Initialize protocol stack and start stack task.
@@ -245,13 +329,15 @@ portCHAR stack_init( void )
 {
 	uint8_t i;
 	buffer_t *b;
-	           
-  buffers = xQueueCreate( STACK_BUFFERS_MAX, sizeof( buffer_t * ) );
+#ifndef STACK_RING_BUFFER_MODE
+  	buffers = xQueueCreate( STACK_BUFFERS_MAX, sizeof( buffer_t * ) );
+#else
+	stack_buffer_wr = stack_buffer_rd = 0;
+#endif
   events = xQueueCreate( STACK_BUFFERS_MAX + 20, sizeof( event_t ) );
 	n_buffers = 0;
 	
-  xTaskCreate( stack_main, "Stack", configMAXIMUM_STACK_SIZE, NULL, STACK_PRIORITY, ( xTaskHandle * )NULL );
-
+	xTaskCreate( stack_main, "Stack", configMAXIMUM_STACK_SIZE, NULL, STACK_PRIORITY, &core_handle );
   /* Initialize modules */
   debug("Stack: mod inits.\r\n");
 	
@@ -264,12 +350,19 @@ portCHAR stack_init( void )
   			memset(b, 0, sizeof(buffer_t));
 			b->size = BUFFER_SIZE;
 			n_buffers++;
-  		if (xQueueSend( buffers, ( void * ) &b,
+#ifdef STACK_RING_BUFFER_MODE
+			if(stack_buffer_add(b) == pdFALSE)
+			{
+				return pdFALSE;
+			}
+#else
+  			if (xQueueSend( buffers, ( void * ) &b,
 					(portTickType) 0 ) == pdFALSE)
 			{ 
 				debug("Stack: buffers fail.\r\n");
 				return pdFALSE;
 			}
+#endif
 		}
 		else
 		{   
@@ -280,216 +373,49 @@ portCHAR stack_init( void )
 	}
 	debug_int(uxQueueMessagesWaiting(buffers));
 	debug(" buffers available.\r\n"); 
-
+	
 	socket_init();
+	#ifndef HAVE_NRP
+	event_queue = xQueueCreate( 2, sizeof( buffer_t * ) );
+	#endif
 	{
 		sockaddr_t init_addr;				/* Make sure that we have mac defined */
 		init_addr.addr_type = ADDR_NONE;
 		rf_mac_get(&init_addr);
+		if(init_addr.addr_type != ADDR_NONE)
+		{
+			rf_set_address(&init_addr);
+		}
 	}
+	
+	mac_mem_alloc();
 	return module_init();
 }
-
 
 /**
  * Initialize protocol stack logical type.
  * 
+ *  !!! OLD API CALL !!!
+ *  !!! Since release v1.1 dont use just use stack_init().
+ * 
  *\param stack_parameters pointer for start parameters, 0 start stack on the default mode.
+ * 
  * \return START_SUCCESS when start parameters are valid.
  * \return CHANNEL_NOT_SUPPORTED when given parameter is not valid.
  * \return TYPE_NOT_SUPPORTED when logical type is not supported.
  */
 start_status_t stack_start(stack_init_t  *stack_parameters)
 {
-	#ifndef AD_HOC_STATE
-	control_message_t *msg;
-	uint8_t i;
-	#endif
-
-
-	uint8_t null_pointer_used=0;
-	portCHAR retval;
-	buffer_t *buffer;
-	buffer = 0;
-
-	/* Check if stack init is ready called */
-	if(events)
+	if(stack_parameters!=NULL)
 	{
-		retval = pdTRUE;
+		vPortFree(stack_parameters);
 	}
-	else
+	if(!(events))
 	{
-		retval = stack_init(); /* Initialize stack core */
+		stack_init(); /* Initialize stack core */
 	}
-
-	if(stack_parameters==NULL)
-	{
-		stack_parameters = pvPortMalloc(sizeof(stack_init_t));
-		if(stack_parameters)
-		{
-			stack_parameters->type = DEFAULT_MODE;
-	#ifdef PAN_CHANNEL
-			stack_parameters->channel = PAN_CHANNEL;
-	#else
-			stack_parameters->channel = RF_DEFAULT_CHANNEL;
-	#endif
-			stack_parameters->pending_ttl_time = 5;
-			stack_parameters->use_sw_mac = 0;
-			null_pointer_used=1;
-		}
-		else
-			return STACK_INIT_FAILED;
-	}
-
-
-	if(retval == pdTRUE)/* Start stack by defined mode */
-	{
-	#ifdef HAVE_RF_802_15_4
-		if(stack_parameters->use_sw_mac == 0)
-			mac_set_mac_pib_parameter(mac_long.address, MAC_IEEE_ADDRESS);
-		else
-			mac_set_mac_pib_parameter(stack_parameters->mac_address, MAC_IEEE_ADDRESS);
-	#endif
-
-		switch(stack_parameters->type)
-		{
-	#ifdef AD_HOC_STATE
-			case DEFAULT_MODE:
-			case AD_HOC_DEVICE:
-	#ifdef HAVE_RF_802_15_4
-				mac_handle_address_decoder(RF_DECODER_ON);
-				rf_802_15_4_ip_layer_address_mode_set(0);
-	#else
-				rf_rx_enable();
-	#endif
-				if(null_pointer_used)
-						vPortFree(stack_parameters);
-				return START_SUCCESS;
-				break;
-			default:
-				if(null_pointer_used)
-					vPortFree(stack_parameters);
-				return TYPE_NOT_SUPPORTED;
-				break;
-	#else
-			case DEFAULT_MODE:
-			#ifdef MAC_FFD
-				stack_parameters->type = BEACON_ENABLE_COORDINATOR;
-				for(i=0;i<2;i++)
-				{
-					stack_parameters->pan_id[i] = mac_long.address[i];
-			 		stack_parameters->short_address[i] = mac_long.address[i];
-				}
-			#else
-				stack_parameters->type=BEACON_ENABLE_CLIENT;
-			#endif
-			default:
-				while(buffer == 0)
-				{
-					buffer = stack_buffer_get(50);
-					if(buffer == 0)
-					{
-						debug("could not get buffer.\r\n");
-						vTaskDelay(50 / portTICK_RATE_MS );
-					}
-				}
-				buffer->options.type = BUFFER_CONTROL;
-				buffer->socket = 0;
-				msg = ( control_message_t*) buffer->buf;
-	#ifdef HAVE_RF_802_15_4
-				mac_set_mac_pib_parameter(stack_parameters->short_address, MAC_SHORT_ADDRESS);		
-	#endif
-	#ifdef HAVE_NWK_MANAGER
-	#ifdef MAC_FFD
-
-				nwk_manager_set_pan_id(stack_parameters->pan_id);
-				if(stack_parameters->type == BEACON_ENABLE_COORDINATOR)
-				{
-					if(stack_parameters->channel >= 11 || stack_parameters->channel <=26)
-					{
-	#ifdef HAVE_RF_802_15_4
-						mac_set_mac_pib_parameter(&(stack_parameters->pending_ttl_time), PENDING_TTL);
-	#endif
-	
-						msg->message.mac_control.message_id = START_REQ;
-						msg->message.mac_control.message.start_req.panid[0] = stack_parameters->pan_id[0];
-						msg->message.mac_control.message.start_req.panid[1] = stack_parameters->pan_id[1];
-						msg->message.mac_control.message.start_req.logical_channel = stack_parameters->channel;
-	#ifdef SUPERFRAME_MODE
-						msg->message.mac_control.message.start_req.beacon_order = BEACON_ORDER;
-						msg->message.mac_control.message.start_req.superframe_order = SUPERFRAME_ORDER;
-	#else
-						msg->message.mac_control.message.start_req.beacon_order = 15;
-						msg->message.mac_control.message.start_req.superframe_order = 15;
-	#endif
-						msg->message.mac_control.message.start_req.pan_cordinator =TRUE;
-						msg->message.mac_control.message.start_req.batt_life_ext = FALSE;
-						msg->message.mac_control.message.start_req.cord_realigment = FALSE;
-						msg->message.mac_control.message.start_req.security_enable = FALSE;
-						nwk_state = CORD_STATE;
-					}
-					else
-					{
-						stack_buffer_free(buffer);
-						buffer=0;
-						if(null_pointer_used)
-							vPortFree(stack_parameters);
-						return CHANNEL_NOT_SUPPORTED;
-					}	
-				}
-				
-				else if(stack_parameters->type==BEACON_ENABLE_GATEWAY)
-				{
-					enable_router_features();
-					msg->message.mac_control.message_id = ROUTER_START;
-					msg->message.mac_control.message.router_start.panid[0] = stack_parameters->pan_id[0];
-					msg->message.mac_control.message.router_start.panid[1] = stack_parameters->pan_id[1];
-					msg->message.mac_control.message.router_start.logical_channel = stack_parameters->channel;
-					nwk_state = ROUTER_STATE;
-				}
-	#else
-				if(stack_parameters->type==BEACON_ENABLE_CLIENT)
-				{
-					uint8_t temp = stack_parameters->type;
-	#ifdef HAVE_RF_802_15_4
-					mac_set_mac_pib_parameter(&(temp), RUNNING_MODE);
-	#endif
-					msg->message.mac_control.message_id = SCAN_REQ;
-					msg->message.mac_control.message.scan_req.scan_type = ACTIVE_SCAN;
-					msg->message.mac_control.message.scan_req.scan_channels = SCAN_ALL;
-					msg->message.mac_control.message.scan_req.scan_duration = 5;	
-					nwk_state = NWK_DISCOVER_STATE;	
-				}
-	#endif
-				else
-	#endif /*HAVE_NWK_MANAGER*/
-				{
-					stack_buffer_free(buffer);
-					buffer=0;
-					if(null_pointer_used)
-						vPortFree(stack_parameters);
-					return TYPE_NOT_SUPPORTED;
-				}
-				break;
-	#endif /* AD_HOC_STATE */
-		}
-		if(null_pointer_used)
-			vPortFree(stack_parameters);
-		buffer->to 		= MODULE_RF_802_15_4;
-		buffer->from 	= MODULE_NWK_MANAGER;
-		stack_buffer_push(buffer);
-		buffer=0;
-		return START_SUCCESS;
-
-	}
-	else
-	{
-		if(null_pointer_used)
-			vPortFree(stack_parameters);
-		return STACK_INIT_FAILED;
-	}
+	return START_SUCCESS;
 }
-
 
 
 
@@ -506,11 +432,11 @@ void stack_main ( void *pvParameters )
 	
 	xLastWakeTime = (portTickType) pvParameters;
 	
-  xLastWakeTime = xTaskGetTickCount();
+  	xLastWakeTime = xTaskGetTickCount();
 	
 	vTaskDelayUntil( &xLastWakeTime, 200 / portTICK_RATE_MS );
 	
-	if ( ( buffers == 0 ) || (events == 0) )
+	if (events == 0 )
 	{
 		debug("Stack: Initialization failure. Halted.\r\n");
 		for(;;)
@@ -523,7 +449,7 @@ void stack_main ( void *pvParameters )
 	xLastWakeTime = xTaskGetTickCount();
 	for(;;)
 	{
-		if (xQueueReceive(events, &( event ), 5000 / portTICK_RATE_MS) == pdTRUE)
+		if (xQueueReceive(events, &( event ), (portTickType) 600 / portTICK_RATE_MS) == pdTRUE)
 		{
 			if (event.process == 0)
 			{	/*it is a buffer*/
@@ -533,10 +459,11 @@ void stack_main ( void *pvParameters )
 			{	/*process event callback*/
 				event.process(event.param);
 			}
+			
 		}	/* end event handling */
-		if ((xTaskGetTickCount() - xLastWakeTime)*portTICK_RATE_MS > 10000)
+		if ((xTaskGetTickCount() - xLastWakeTime)*portTICK_RATE_MS > 15000)
 		{
-			check_tables_status(0);
+			check_tables_status();
 			xLastWakeTime = xTaskGetTickCount();
 		}
 	} /* end task loop */
@@ -556,60 +483,6 @@ void stack_buffer(buffer_t *b)
 	socket_t *si = (socket_t *) b->socket;
 	
 	if (b == 0) return;
-
-	/*if ( ((si != 0) && (si->stack_id == STACKS_MAX)) || (b->options.type == BUFFER_CONTROL) )
-	{	// this is a control packet
-		debug("\r\n Control message");
-		if ((b->to == MODULE_NONE) || (b->to == MODULE_APP))
-		{	//socket routing
-			switch(b->dir)
-			{
-				case BUFFER_DOWN:
-					debug("\r\n Direction Down");
-					if (si) b->to = (module_id_t)si->protocol;
-					else
-					{
-						stack_buffer_free(b);
-						b = 0;
-					}
-					break;
-	
-				case BUFFER_UP:
-					if ((si))
-					{
-						if(socket_up(b) == pdTRUE)
-						{
-							debug("\r\n To control socket");
-							b = 0;
-						}
-					}
-					else
-					{
-						if(socket_up(b) == pdTRUE)
-						{
-							debug("\r\n To control socket");
-							b = 0;
-						}
-						else
-						{
-							stack_buffer_free(b);
-							b = 0;
-						}
-					}
-					break;
-			}
-		}
-		if (b)
-		{
-			
-			if (module_call(b->to, b) == pdFALSE)
-			{
-				debug("Packet refused by module -> free.\r\n");
-				stack_buffer_free(b);               					 
-			}
-		}
-		return;
-	}*/
 	
 	if ((b->to != MODULE_NONE) && (b->to != MODULE_APP))
 	{	/*protocol identifier used*/
@@ -617,7 +490,7 @@ void stack_buffer(buffer_t *b)
 		if (module_call(b->to, b) == pdFALSE)
 		{
 			debug("Packet refused by module -> free.\r\n");
-			stack_buffer_free(b);               					 
+			stack_buffer_free(b);
 		}
 	}
 	else if (b->dir == BUFFER_DOWN)
@@ -728,7 +601,10 @@ void stack_buffer(buffer_t *b)
 			{
 				debug("Unknown packet(1) -> free.\r\n");
 			}
-			if (b != 0) stack_buffer_free(b);
+			if (b != 0)
+			{ 
+				stack_buffer_free(b);
+			}
 		}
 		debug("Handler: eject.\r\n");
 	}
@@ -753,7 +629,10 @@ void stack_module_call(uint8_t stack_id, uint8_t layer, buffer_t *b)
 			if (modules[i].id == stacks[stack_id].module[layer])
 			{
 				found = 1;
+
+
 				modules[i].handle(b);
+
 				break;
 			}
 			else i++;
@@ -794,6 +673,8 @@ portCHAR stack_module_check(uint8_t stack_id, uint8_t layer, buffer_t *b)
 
 /**
  *  Get buffer from stack.
+ * 
+ *  Buffer allocation in the interrupt should use stack_buffer_pull() function which return buffer pointer.
  *
  *	\param blocktime  time to wait for buffer
  *
@@ -801,7 +682,40 @@ portCHAR stack_module_check(uint8_t stack_id, uint8_t layer, buffer_t *b)
  */
 buffer_t* stack_buffer_get ( portTickType blocktime )
 {
-  buffer_t *b; 
+  buffer_t *b=0;
+#ifdef STACK_RING_BUFFER_MODE
+	if( blocktime)
+	{
+		blocktime >> 2;
+		if(!blocktime) blocktime=1;
+	}
+	while(b == 0)
+	{
+		portENTER_CRITICAL();
+		b=stack_buffer_pull();
+		portEXIT_CRITICAL();
+		if(b)
+		{
+			b->options.type = BUFFER_DATA;
+			b->dir = BUFFER_DOWN;
+			b->socket = 0;
+			b->buf_ptr = 0;
+			b->buf_end = 0;
+			b->options.lowpan_compressed=0;
+			b->options.handle_type = HANDLE_DEFAULT;
+			return b;
+		}
+		else if(blocktime)
+		{
+			vTaskDelay((portTickType) 8);
+			blocktime--;
+		}
+		else
+		{
+			return 0;
+		}
+	}
+#else
 
   if (xQueueReceive( buffers, &( b ), 0) == pdTRUE)
 	{
@@ -814,7 +728,7 @@ buffer_t* stack_buffer_get ( portTickType blocktime )
 		b->options.handle_type = HANDLE_DEFAULT;
 		return b;
 	}
-	else if (n_buffers < STACK_BUFFERS_MAX)
+	/*else if (n_buffers < STACK_BUFFERS_MAX)
 	{
 		b = pvPortMalloc(sizeof(buffer_t)+BUFFER_SIZE);
 		if (b)
@@ -830,7 +744,7 @@ buffer_t* stack_buffer_get ( portTickType blocktime )
 			n_buffers++;
 			return b;
 		}
-	}
+	}*/
     else if (xQueueReceive( buffers, &( b ), blocktime / portTICK_RATE_MS) == pdTRUE)
 	{
 		b->options.type = BUFFER_DATA;
@@ -842,6 +756,7 @@ buffer_t* stack_buffer_get ( portTickType blocktime )
 		b->options.handle_type = HANDLE_DEFAULT;
 		return b;
 	}
+#endif
 	return 0;
 }
 
@@ -879,13 +794,17 @@ buffer_t* stack_buffer_allocate( uint8_t size )
 /**
  *  Free stack buffer.
  *
+ * *  Buffer free in the interrupt shuold use stack_buffer_add(buffert_t *b).
+ * 
+ * 
  *	\param b					pointer to buffer
  *
  */
-void stack_buffer_free ( buffer_t *b )
+portCHAR stack_buffer_free ( buffer_t *b )
 {
 	if (b)
   	{ 
+		portCHAR ret_val;
 		b->socket = 0;
 		b->from = MODULE_NONE;
 		b->to = MODULE_NONE;
@@ -894,17 +813,31 @@ void stack_buffer_free ( buffer_t *b )
 	#ifdef HAVE_DYNAMIC_BUFFERS
 		if (b->size == BUFFER_SIZE)
 		{
-			if(xQueueSend( buffers, ( void * ) &b, ( portTickType ) 0 ) != pdTRUE)
-				debug("FER\r\n");
+		#ifdef STACK_RING_BUFFER_MODE
+			portENTER_CRITICAL();
+			ret_val = stack_buffer_add(b);
+			portEXIT_CRITICAL();
+			return ret_val;
+		#else
+			xQueueSend( buffers, ( void * ) &b, ( portTickType ) 0 );
+		#endif
 		}
 		else
 		{
 			vPortFree(b);
 		}
 	#else
-		xQueueSend( buffers, ( void * ) &b, ( portTickType ) 0 );
+		#ifdef STACK_RING_BUFFER_MODE
+			portENTER_CRITICAL();
+			ret_val = stack_buffer_add(b);
+			portEXIT_CRITICAL();
+			return ret_val;
+		#else
+			xQueueSend( buffers, ( void * ) &b, ( portTickType ) 0 );
+		#endif
 	#endif
 	}
+	return pdFALSE;
 }
 
 /**
@@ -960,16 +893,17 @@ uint8_t stack_number_get()
 	return STACKS_MAX;
 }
 
-stack_event_t event_queue;
-/**
- *  Open bus for stack event messages.
- *
- *  \return  event_queue what is the pointer stacks event message queue.
- */
+
 stack_event_t open_stack_event_bus(void)
 {
-	event_queue = xQueueCreate( 8, sizeof( buffer_t * ) );
-	return event_queue;
+	if(event_queue)
+	{
+		return event_queue;
+	}
+	else
+	{
+		return 0;	
+	}
 }
 
 /**
@@ -1100,33 +1034,36 @@ portCHAR stack_compare_address(sockaddr_t *a1, sockaddr_t *a2)
  *	\param	type	Type of the address (ADDR_802_15_4_PAN_LONG, ADDR_802_15_4_LONG, ADDR_802_15_4_PAN_SHORT or ADDR_802_15_4_SHORT)
  *	\param	address	The actual address structure
  */
-uint8_t * stack_insert_address_to_buffer(uint8_t *dptr, addrtype_t type, address_t address)
+uint8_t * stack_insert_address_to_buffer(uint8_t *dptr, addrtype_t type, uint8_t *address)
 {
 	uint8_t i;
 	if(type == ADDR_802_15_4_PAN_LONG || type == ADDR_802_15_4_LONG )
 	{
+		
 		if(type == ADDR_802_15_4_PAN_LONG)
 		{
-			/*buf->buf[ind++] = address[8];
-			buf->buf[ind++] = address[9];*/
-			*dptr++ = address[8];
-			*dptr++ = address[9];
+			address += 8;
+			*dptr++ = *address++;
+			*dptr++ = *address++;
+			address -= 10;
 		}
 		for (i = 0; i < 8; i++)
 		{
-			*dptr++ = address[i];
+			*dptr++ = *address++;
 		}
 	}
 	else if(type == ADDR_802_15_4_PAN_SHORT  || type == ADDR_802_15_4_SHORT)
 	{
 		if(type == ADDR_802_15_4_PAN_SHORT)
 		{
-			*dptr++ = address[2];
-			*dptr++ = address[3];
+			address += 2;
+			*dptr++ = *address++;
+			*dptr++ = *address++;
+			address -= 4;
 		}
 		for (i = 0; i < 2; i++)
 		{
-			*dptr++ = address[i];
+			*dptr++ = *address++;
 		}
 	}
 	else
@@ -1144,16 +1081,19 @@ return dptr;
  *	\return	pdFALSE	Not a broadcast address
  *	\return	pdTRUE	A brodcast address
  */
-portCHAR stack_check_broadcast(address_t address, addrtype_t type)
+portCHAR stack_check_broadcast(uint8_t *address, addrtype_t type)
 {
 	uint8_t i, len=4;
+	if(type==ADDR_BROADCAST)
+		return pdTRUE;
+
 	if(type==ADDR_802_15_4_PAN_LONG || type==ADDR_802_15_4_LONG)
 		len=8;
 	if(type==ADDR_SHORT)
 		len=2;
 	for(i=0; i<len; i++)
 	{
-		if(address[i] != 0xff)
+		if(*address++ != 0xff)
 		{
 			return pdFALSE;
 		}

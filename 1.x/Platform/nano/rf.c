@@ -30,7 +30,7 @@
 /**
  *
  * \file rf.c
- * \brief nano.4 RF driver.
+ * \brief nano.4 PIO based RF driver.
  *
  *  Nano.4: RF control functions.
  *   
@@ -53,6 +53,7 @@
 #include "bus.h"
 #include "dma.h"
 #include "mac.h"
+#include "gpio.h"
 #include "rf.h"
 
 #ifndef RF_DEFAULT_POWER
@@ -64,12 +65,6 @@
 #endif
 
 #ifdef HAVE_RF_LED
-#ifdef HAVE_NRP
-#define RF_RX_LED_ON() LED1_ON()
-#define RF_RX_LED_OFF() LED1_OFF()
-#define RF_TX_LED_ON() LED2_ON()
-#define RF_TX_LED_OFF() LED2_OFF()
-#else
 #if HAVE_RF_LED == 1
 #define RF_RX_LED_ON() LED1_ON()
 #define RF_RX_LED_OFF() LED1_OFF()
@@ -81,21 +76,41 @@
 #define RF_TX_LED_ON() LED2_ON()
 #define RF_TX_LED_OFF() LED2_OFF()
 #endif /*RF_LED == 1 */
-#endif	/*HAVE_NRP*/
+#else
+#ifdef HAVE_RF_DUAL_LED
+#define RF_RX_LED_ON() LED1_ON()
+#define RF_RX_LED_OFF() LED1_OFF()
+#define RF_TX_LED_ON() LED2_ON()
+#define RF_TX_LED_OFF() LED2_OFF()
 #else
 #define RF_RX_LED_ON()
 #define RF_RX_LED_OFF()
 #define RF_TX_LED_ON()
 #define RF_TX_LED_OFF()
+#endif /*HAVE_RF_DUAL_LED*/
 #endif /*HAVE_RF_LED*/
 
 uint8_t rf_initialized = 0;
 
 uint8_t rf_tx_power;
-uint8_t rx_flags, tx_flags;
+uint8_t rf_flags;
+
 #define RX_ACTIVE 0x80
+#define TX_ACK 0x40
+#define TX_ON_AIR 0x20
+#define RX_NO_DMA
 
 uint16_t rf_manfid;
+
+extern int8_t timer_rf_launch(uint8_t ticks);
+extern void timer_rf_stop(void);
+
+
+#ifdef HAVE_RF_ERROR
+uint8_t rf_error = 0;
+#endif
+
+uint8_t rf_softack;
 
 /**
  * Execute a single CSP command.
@@ -156,16 +171,19 @@ portCHAR rf_channel_set(uint8_t channel)
 	uint16_t freq;
 	
 	if ( (channel < 11) || (channel > 26) ) return -1;
-	
+	rf_command(ISSTOP);	/*make sure CSP is not running*/
+	rf_command(ISRFOFF);
 	/* Channel values: 11-26 */
 	freq = (uint16_t) channel - 11;
 	freq *= 5;	/*channel spacing*/
 	freq += 357; /*correct channel range*/
 	freq |= 0x4000; /*LOCK_THR = 1*/
-
 	FSCTRLH = (freq >> 8);
-	FSCTRLL = (uint8_t)freq;	
+	FSCTRLL = (uint8_t)freq;
 	
+	rf_command(ISRXON);
+	RFST = ISFLUSHRX;
+	RFST = ISFLUSHRX;
 	return (int8_t) channel;
 }
 
@@ -205,6 +223,8 @@ portCHAR rf_power_set(uint8_t new_power)
 	return rf_tx_power;
 }
 
+uint8_t rf_dma_buffer[5];
+
 /**
  * Enable RF receiver.
  *
@@ -214,27 +234,21 @@ portCHAR rf_power_set(uint8_t new_power)
  */
 portCHAR rf_rx_enable(void)
 {
-	if (rx_flags == 0)
+	if (!(rf_flags & RX_ACTIVE))
 	{
-		RFIF &= ~(IRQ_SFD);
+  		IOCFG0 = 0x7f;   // Set the FIFOP threshold 127
+		RSSIH = 0xd2; /* -84dbm = 0xd2 default, 0xe0 -70 dbm */
+		rf_flags |= RX_ACTIVE;
 
-  	IOCFG0 = 0x04;   // Set the FIFOP threshold
-		tx_flags = 0;
-		rx_flags = RX_ACTIVE;
-		S1CON &= ~(RFIF_0 | RFIF_1);
 		RFPWR &= ~RREG_RADIO_PD;	/*make sure it's powered*/
 		while((RFIF & IRQ_RREG_ON) == 0);	/*wait for power up*/
 		SLEEP &= ~OSC_PD; /*Osc on*/
 		while((SLEEP & XOSC_STB) == 0);	/*wait for power up*/
-		
-		RFIM |= IRQ_SFD;
-		RFIF &= ~(IRQ_SFD);
 
-		S1CON &= ~(RFIF_0 | RFIF_1);
-		IEN2 |= RFIE;
-		rf_command(ISRXON);
+		rf_command(ISRXON);		
 	}
-	
+	RFST = ISFLUSHRX;
+	RFST = ISFLUSHRX;
 	return pdTRUE;
 }
 
@@ -247,17 +261,15 @@ portCHAR rf_rx_enable(void)
  */
 portCHAR rf_rx_disable(void)
 {
-	RFIM &= ~IRQ_SFD;
-
-	rf_command(ISSTOP);
+	rf_command(ISSTOP);	/*make sure CSP is not running*/
 	rf_command(ISRFOFF);
 
 	RFPWR |= RREG_RADIO_PD;		/*RF powerdown*/
-	IEN2 &= ~RFIE;
-	rx_flags = 0;
-	
+
+	rf_flags = 0;
 	return pdTRUE;
 }
+
 
 /**
  * Enable RF transmitter.
@@ -268,14 +280,11 @@ portCHAR rf_rx_disable(void)
  */
 portCHAR rf_tx_enable(void)
 {
-	RFIM &= ~IRQ_SFD;
+	DMAARM = 0x80 + (1 << 0);	/*ABORT + channel bit*/
 
-	IEN2 &= ~RFIE;
-	tx_flags |= RX_ACTIVE;
-	rx_flags = 0;
 	return pdTRUE;
 }
-
+   
 /**
  * Initialize RF.
  *
@@ -289,25 +298,28 @@ portCHAR rf_init(void)
 	portCHAR retval = pdFALSE;
 
 	if (rf_initialized) return pdTRUE;
-	
+
 	RFPWR &= ~RREG_RADIO_PD;	/*make sure it's powered*/
 	while ((RFPWR & ADI_RADIO_PD) == 1);
 	while((RFIF & IRQ_RREG_ON) == 0);	/*wait for power up*/
 	SLEEP &= ~OSC_PD; /*Osc on*/
 	while((SLEEP & XOSC_STB) == 0);	/*wait for power up*/
 	
-	rx_flags = tx_flags = 0;
-	
+	rf_flags = 0;
+	rf_softack = 0;
+		
 	retval = pdTRUE;
 
-	FSMTC1 &= ~ABORTRX_ON_SRXON;	/*don't abort reception, if enable called*/
-	FSMTC1 |= ACCEPT_ACKPKT;
+	FSMTC1 = 1;	/*don't abort reception, if enable called, accept ack, auto rx after tx*/
 	
-	MDMCTRL0H &= ~0x18;	 /* Generic client */
-	MDMCTRL0L &= ~0x10;	 /* no automatic ACK */
+	MDMCTRL0H = 0x02;	 /* Generic client, standard hysteresis, decoder on 0x0a */
+	MDMCTRL0L = 0xE2;	 /* automatic ACK and CRC, standard CCA and preamble 0xf2 */
 
-	MDMCTRL1H = 0x14;	/* CC2420 behaviour*/
+	MDMCTRL1H = 0x30;			/*defaults*/
 	MDMCTRL1L = 0x00;
+
+	RXCTRL0H = 0x32;
+	RXCTRL0L = 0xf5;
 	
 	/* get ID for MAC */
 	rf_manfid = CHVER;
@@ -322,10 +334,21 @@ portCHAR rf_init(void)
 	retval = pdTRUE;
 		
 	rf_command(ISFLUSHTX);
-	rf_command(ISFLUSHRX);
+	rf_command(ISFLUSHRX);	
+	//RFIM = IRQ_FIFOP | IRQ_SFD | IRQ_TXDONE;
+	//RFIF &= ~(IRQ_FIFOP | IRQ_SFD| IRQ_TXDONE);
 
-	rf_rx_enable();
+	RFIM = IRQ_FIFOP;
+	RFIF &= ~(IRQ_FIFOP);
 
+	S1CON &= ~(RFIF_0 | RFIF_1);
+	IEN2 |= RFIE;
+	//IEN0_RFERRIE = 1;
+	
+	//rf_rx_enable();
+
+	RF_TX_LED_OFF();
+	RF_RX_LED_OFF();
 	rf_initialized = 1;
 	return retval;
 }
@@ -343,20 +366,22 @@ void rf_set_address(sockaddr_t *address)
 	switch(address->addr_type)
 	{
 		case ADDR_802_15_4_PAN_LONG:
+			PANIDH = address->address[8];
+			PANIDL = address->address[9];
+		case ADDR_802_15_4_LONG:
 			ptr = &IEEE_ADDR0;
 			for(i=0; i<8;i++)
 			{
 				*ptr++ = address->address[i];
 			}
-			PANIDH = address->address[8];
-			PANIDL = address->address[9];
 			break;
 		
 		case ADDR_802_15_4_PAN_SHORT:
-			SHORTADDRH = address->address[0];
-			SHORTADDRL = address->address[1];
 			PANIDH = address->address[2];
 			PANIDL = address->address[3];
+		case ADDR_802_15_4_SHORT:
+			SHORTADDRH = address->address[0];
+			SHORTADDRL = address->address[1];
 			break;
 		
 		default:
@@ -369,34 +394,43 @@ void rf_set_address(sockaddr_t *address)
  * \param param 1=on 0=off. 
  * \return pdTRUE operation successful
  */
-portCHAR rf_address_decoder_mode(uint8_t param)
+portCHAR rf_address_decoder_mode(rf_address_mode_t mode)
 {
 	portCHAR retval = pdFALSE;
 
+	rf_softack = 0;
 	/* set oscillator on*/	
-	if(param)
+	switch(mode)
 	{
-#ifdef COORDINATOR
-		MDMCTRL0H |= 0x18;	 /*Coordinator, Address-decode on */
-		MDMCTRL0L &= ~0x10;	 /* no automatic ACK *//* Enable receive beacon if address decoder is enabled */
-#else
-#ifdef HAVE_NRP
-		MDMCTRL0H &= ~0x18;	 /* Generic client */
-		MDMCTRL0L &= ~0x10;	 /* no automatic ACK */
-#else
-		MDMCTRL0H |= 0x08;	 /*Address-decode on */
-		MDMCTRL0L |= 0x10;	 /*automatic ACK */ /* Enable receive beacon if address decoder is enabled */
-#endif
-#endif	
-	}
-	else
-	{
-		MDMCTRL0H &= ~0x18;	 /* Generic client */
-		MDMCTRL0L &= ~0x10;	 /* no automatic ACK */
+		case RF_SOFTACK_MONITOR:
+			rf_softack = 1;
+		case RF_MONITOR:
+			MDMCTRL0H |= 0x10;	 /*Address-decode off , coordinator*/
+			MDMCTRL0L &= ~0x10;	 /*no automatic ACK */
+			break;
+			
+		case RF_DECODER_COORDINATOR:
+			MDMCTRL0H |= 0x18;	 /*Address-decode on , coordinator*/
+			MDMCTRL0L |= 0x10;	 /*automatic ACK */
+			break;
+			
+		case RF_DECODER_ON:
+			MDMCTRL0H |= 0x08;	 /*Address-decode on */
+			//MDMCTRL0H &= ~0x18;	 /* Generic client */
+			//MDMCTRL0L |= 0x10;	 /*automatic ACK */
+			MDMCTRL0L &= ~0x10;	 /* no automatic ACK */
+			break;
+
+		default:
+			MDMCTRL0H &= ~0x18;	 /* Generic client */
+			MDMCTRL0L &= ~0x10;	 /* no automatic ACK */
+			break;
 	}
 	retval = pdTRUE;
 	return retval; 
 }
+
+
 
 /**
  * Channel energy detect.
@@ -408,24 +442,11 @@ portCHAR rf_address_decoder_mode(uint8_t param)
  
 int8_t rf_analyze_rssi(void)
 {
-	uint8_t counter, i;
-	int16_t sum=0;
-	int8_t retval = 0, temp=0;
-	
-	rf_command(ISRXON);
-	pause_us(16);				/* waiting one symbol period */
-	pause_us(16);				/* waiting one symbol period */
-	counter = 0;
-	for(i=0; i<8; i++)
-	{
-		temp = (int8_t)RSSIL;
-		temp -= 45;
-		sum += (int16_t)temp;
-		pause_us(16);				/* waiting one symbol period */
-	}
-	sum /=8;
-	retval = (int8_t)sum;
-	
+	int8_t retval = -128;
+	pause_us(128);	
+
+	retval = (int8_t)RSSIL;
+	retval -= 45;
 	return retval; 
 }
 
@@ -485,6 +506,7 @@ portCHAR rf_cca_check(uint8_t backoff_count, uint8_t slotted)
 }
 
 
+
 /**
  * Send ACK.
  *
@@ -516,41 +538,20 @@ void rf_send_ack(uint8_t pending)
  * \return pdTRUE
  * \return pdFALSE	bus reserved
  */
- 
 portCHAR rf_write(buffer_t *buffer)
 {
 	uint8_t counter, i;
 	portCHAR retval = pdTRUE;
 	int16_t length =  buffer->buf_end - buffer->buf_ptr;
 	
-	RF_TX_LED_ON();
-	if (rx_flags & RX_ACTIVE)
-	{
-		if ( (RFSTATUS & FIFOP) || (RFSTATUS & SFD) )
-		{
-#ifdef RF_DEBUG				
-			debug("RF: Packet IF busy.\r\n");
-#endif
-			if ((RFSTATUS & FIFOP))
-			{
-				rf_command(ISFLUSHTX);
-				rf_command(ISFLUSHRX);
-				rf_command(ISFLUSHRX);
-			}
-			RF_TX_LED_OFF();
-			retval = pdFALSE;		
-		}
-	}
-	
-	rf_tx_enable();
-	if ( (length <= 128) && (retval == pdTRUE) )
+	if (rf_flags & TX_ACK) return pdFALSE;
+	if ((rf_flags & RX_ACTIVE) == 0) rf_rx_enable();
+
+	if (length <= 128) 
 	{
 		uint8_t *ptr = buffer->buf + buffer->buf_ptr;
-		
 		rf_command(ISFLUSHTX);
-
 		RFD = (length+2);
-
 		for (i = 0 ; i < length ; i++)
 		{
 			RFD = *ptr++;
@@ -560,43 +561,40 @@ portCHAR rf_write(buffer_t *buffer)
 
 		if (rf_cca_check(0,0) == pdFALSE)
 		{
-			rf_command(ISFLUSHTX);
-			rx_flags = 0;
-			rf_rx_enable();
-			RF_TX_LED_OFF();
-			return pdTRUE+1;
+			return pdFALSE;
 		}
 
-		i= 0;
 		RFIF &= ~IRQ_TXDONE;
-		while (i++ < 3)
+		rf_command(ISTXON);
+		counter = 0;	
+		while(!(RFSTATUS & TX_ACTIVE) && (counter++ < 3))
 		{
-			rf_command(ISTXON);
-			counter = 0;	
-			while(!(RFSTATUS & TX_ACTIVE) && (counter++ < 200))
+			/*if (RFSTATUS & (SFD | TX_ACTIVE) == SFD)
 			{
-				pause_us(10);
+				rf_command(ISRXON);
+				counter = 3;
 			}
-			if (RFSTATUS & TX_ACTIVE) i = 200;
+			else
+			{*/
+				pause_us(10);
+			//}
 		}
 
-		if (i ==3)
+		if (!(RFSTATUS & TX_ACTIVE))
 		{
 #ifdef RF_DEBUG
 			debug("\r\nRF: TX never active.\r\n");
 #endif
-			rf_command(ISRFOFF);
-			tx_flags = 0;
 			retval = pdFALSE;
+				//retval =pdTRUE+1;
 		}
 		else
 		{
-			while(!(RFIF & IRQ_TXDONE))
-			{
-				pause_us(10);
-			}
+			RF_RX_LED_OFF();
+			RF_TX_LED_ON();
+			//rf_flags |= TX_ACK | TX_ON_AIR;
+			//rf_flags |= TX_ON_AIR;
 		}
-		RF_TX_LED_OFF();
 	}
 	if ((retval == pdTRUE) && (length > 128))
 	{
@@ -607,9 +605,6 @@ portCHAR rf_write(buffer_t *buffer)
 #endif
 		retval = pdFALSE;
 	}
-	tx_flags = 0;
-	rf_rx_enable();
-
 
 	return retval;		
 }
@@ -631,7 +626,7 @@ portCHAR rf_mac_get(sockaddr_t *address)
 		{
 			address->address[7-i] = ft_buffer[i];
 		}
-		address->addr_type = ADDR_802_15_4_LONG;
+		address->addr_type = ADDR_802_15_4_PAN_LONG;
 		if (stack_check_broadcast(address->address, ADDR_802_15_4_LONG) == pdTRUE)
 		{
 			debug("No address in flash.\n");
@@ -650,99 +645,38 @@ portCHAR rf_mac_get(sockaddr_t *address)
 			address->address[7]= 0x34;
 #endif
 		}
+		address->address[8] = 0xff;
+		address->address[9] = 0xff;
 		mac_set(address);
 	}
 
 	return pdTRUE;
 }
 
-void rf_rx_callback(void *param);
+extern xQueueHandle buffers;
+#ifdef HAVE_MAC_15_4
+extern void mac_push(buffer_t *b);
+extern void mac_rx_push(void);
+extern uint8_t ack_handle(uint8_t sqn);
+extern portCHAR check_mac_rx_size(void);
+#endif
+extern sockaddr_t mac_long;
+#ifdef HAVE_NRP
+extern sockaddr_t mac_short;
+#endif
+
+uint8_t rfi_tmp, rfi_pac_type ;
 
 void rf_rx_callback(void *param)
 {
-	buffer_t *b;
-	uint8_t i;
-	uint8_t *ptr;
-	uint16_t tmp_16;
-		
 	param;
+	return;
+}
 
-	b = stack_buffer_get(20);
-	if (b)
-	{
-		b->options.type = BUFFER_DATA;
-#ifdef HAVE_802_15_4_RAW
-		b->to = MODULE_802_15_4_RAW;
-#endif
-
-#ifdef HAVE_RF_802_15_4
-		b->to = MODULE_RF_802_15_4;
-#endif
-		b->dir = BUFFER_UP;
-		b->buf_ptr = 0;
-		
-		tmp_16 = 0;
-		if ((RFSTATUS & SFD) != 0)
-		{
-			while( ((RFSTATUS & SFD) != 0) && (tmp_16++ > 1000))
-			{
-			}
-		}
-		if (tmp_16 <= 1000)
-		{
-			if( ((RFSTATUS & FIFOP)) && (! ((RFSTATUS & FIFO)) ) ) 
-			{
-#ifdef RF_DEBUG
-				debug("RF:OV.\r\n");
-#endif
-				rf_command(ISFLUSHRX);
-				rf_rx_enable();
-			}
-			else if( ((RFSTATUS & FIFO)) && (! ((RFSTATUS & SFD)) ))
-			{ /*Data in buffer*/
-				i = RFD & 0x7F;
-				i -= 2;
-
-				b->buf_end = i;
-				ptr = b->buf;
-
-				while(i)
-				{
-					*ptr++ = RFD;			
-					i--;
-				}		
-
-				b->options.rf_dbm = ((int8_t) RFD) - 45;
-				b->options.rf_lqi = RFD;
-
-				if (b->options.rf_lqi & 0x80)
-				{
-					b->options.rf_lqi &= ~0x80;
-					stack_buffer_push(b);
-					b = 0;
-				}
-				else
-				{
-#ifdef RF_DEBUG
-					debug("RF: drop\r\n");	
-#endif
-				}
-				rf_rx_enable();
-			}/*end data in buffer*/
-		}
-		else
-		{
-			rf_command(ISFLUSHRX);
-		}
-		if (b != 0) stack_buffer_free(b);
-	}
-	else
-	{
-		rf_command(ISFLUSHRX);
-#ifdef RF_DEBUG_RSSI
-		debug("-");
-#endif		
-	}
+void rf_timer_callback(void);
+void rf_timer_callback(void)
+{
+	rf_flags &= ~TX_ACK;
 }
 
 /**
@@ -751,29 +685,150 @@ void rf_rx_callback(void *param)
  */
 void rf_ISR( void ) interrupt (RF_VECTOR)
 {
-	portBASE_TYPE prev_task = pdFALSE;
-	
-	if ((RFIF & IRQ_SFD) && (tx_flags == 0))
+	EA = 0;
+	RF_TX_LED_ON();
+	if (RFIF & IRQ_TXDONE)
 	{
-		event_t event;
-		event.process = rf_rx_callback;
-		event.param = (void *) 0;
-
-		prev_task = xQueueSendFromISR(events, &event, prev_task);
-		if (prev_task == pdTRUE)
+		
+		if (rf_flags & TX_ON_AIR)
 		{
-			taskYIELD();
+			//rf_flags |= TX_ACK;
+			rf_flags ^= TX_ON_AIR;
+			//timer_rf_launch(MAC_IFS); //832 us in timer ticks
 		}
+		RF_TX_LED_OFF();
+		RFIF &= ~IRQ_TXDONE;
 	}
-	if (RFIF & IRQ_SFD)
+	if (RFIF & IRQ_FIFOP)
 	{
-		RFIF &= ~IRQ_SFD;
-	}
+		RF_TX_LED_OFF();
+		if (RFSTATUS & FIFO)
+		{
+			uint8_t len = RFD;
+			len &= 0x7f;
+			if(len > 4)
+			{
+				rf_dma_buffer[0] = RFD;
+				rfi_pac_type = rf_dma_buffer[0];
+				rfi_pac_type &= 0x07;
+				if(rfi_pac_type==0x02)
+				{
+					rf_dma_buffer[1] = RFD;
+					rf_dma_buffer[2] = RFD;
+					rf_dma_buffer[3] = RFD;
+					rf_dma_buffer[4] = RFD;
+					if (rf_dma_buffer[4] & 0x80)
+					{
+						ack_handle(rf_dma_buffer[2]);
+					}
+				}
+				else
+				{
+					portBASE_TYPE task = pdFALSE;
+					buffer_t *rf_buf = 0;
+					len--;
+					if(len && check_mac_rx_size() != pdTRUE)
+					{
+						len=0;
+						rf_command(ISFLUSHRX);
+					}	
+#ifdef STACK_RING_BUFFER_MODE
+					if(len)
+					{
+						rf_buf=0;
+						rf_buf = stack_buffer_pull();
+					}
+					if (len && rf_buf)
+#else
+					if (len && (xQueueReceiveFromISR( buffers, &( rf_buf ), &prev_task) == pdTRUE))
+#endif
+					{
+						uint8_t i;
+						uint8_t *ptr2 = &(rf_buf->buf[0]);
+						*ptr2++ = rf_dma_buffer[0];
 
+						if(rf_dma_buffer[0] & 0x20)
+						{
+#ifdef HAVE_NRP 
+							if ((rf_softack & 2) == 0)
+							{
+								RFST = ISACK;
+							}
+#else
+								RFST = ISACK;		
+#endif
+						}
+						len -= 2;
+						for (i=0; i<len; i++)
+						{
+							*ptr2++ = RFD;
+						}
+			
+						rf_buf->options.rf_dbm = ((int8_t) RFD) - 45;
+						rf_buf->options.rf_lqi = RFD;
+				
+						
+						if ((rf_buf->options.rf_lqi & 0x80) )
+						{
+							len++;
+							rf_buf->options.type = BUFFER_DATA;
+							rf_buf->socket = 0;
+							rf_buf->buf_ptr = 0;
+							rf_buf->buf_end = len;
+							rf_buf->options.rf_lqi &= 0x7F;
+							rf_buf->dir = BUFFER_UP;
+		
+			#ifdef HAVE_MAC_15_4
+								mac_push(rf_buf);
+								mac_rx_push();
+			#else
+							{
+								event_t event;
+								event.process = 0;
+								event.param = (void *) rf_buf;
+				
+								prev_task = xQueueSendFromISR( events, ( void * ) &event, prev_task);
+							}
+			#endif
+						}
+						else
+						{
+							rf_buf->buf_end = 0;
+		#ifdef STACK_RING_BUFFER_MODE
+							stack_buffer_add(rf_buf);
+		#else
+							prev_task = xQueueSendFromISR( buffers, ( void * ) &rf_buf, prev_task);
+		#endif
+							rf_buf=0;
+						}
+			}
+			else
+			{
+				rf_command(ISFLUSHRX);
+			}
+				}
+			}
+			else
+			{
+				rf_command(ISFLUSHRX);
+				rf_command(ISFLUSHRX);
+			}
+		RF_RX_LED_ON();
+		}
+		else
+		{
+			rf_command(ISFLUSHRX);
+			rf_command(ISFLUSHRX);
+		}
+		RFIF &= ~IRQ_FIFOP;
+	}
 	S1CON &= ~(RFIF_0 | RFIF_1);
+	RFIM |= IRQ_FIFOP;
+	
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	EA = 1;
 }
 
 /**
@@ -782,8 +837,20 @@ void rf_ISR( void ) interrupt (RF_VECTOR)
  */
 void rf_error_ISR( void ) interrupt (RFERR_VECTOR)
 {
+	EA = 0;
 	TCON_RFERRIF = 0;
+#ifdef HAVE_RF_ERROR
+	rf_error = 254;
+#endif
+	rf_command(ISRFOFF);
+	rf_command(ISFLUSHRX);
+	rf_command(ISFLUSHRX);
+	rf_command(ISRXON);
+	RF_RX_LED_OFF();
+	RF_TX_LED_OFF();
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	EA = 1;
 }
+

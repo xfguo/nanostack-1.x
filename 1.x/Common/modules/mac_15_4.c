@@ -60,6 +60,8 @@
 #include "cipv6.h"
 #include "rf.h"
 #include "mac.h"
+#include "gpio.h"
+#include "aes.h"
 
 /*
 [NAME]
@@ -83,12 +85,19 @@ extern portCHAR mac_check( buffer_t *buf );
 	*/
 #define MAC_TICK_FACTOR 1/32
 #define PLATFORM_RAND_SEED 32
+//#define MAC_RING_BUFFER_SIZE (STACK_BUFFERS_MAX + 1)
+//#define MAC_RING_BUFFER_SIZE_RX MAC_RING_BUFFER_SIZE
+#define MAC_RING_BUFFER_SIZE_RX (4 + 1)
+#define MAC_RING_BUFFER_SIZE_TX (3 + 1)
+//#define MAC_RING_BUFFER_SIZE_TX MAC_RING_BUFFER_SIZE
 
 extern void timer_mac_launch(uint16_t mac_ticks);
 extern void timer_mac_stop(void);
 
 extern void rf_rx_callback(void *param);
-
+#ifdef HAVE_NRP
+extern void nrp_channel_notify(void);
+#endif
 extern sockaddr_t mac_short;
 extern sockaddr_t mac_long;
 
@@ -143,19 +152,22 @@ extern sockaddr_t mac_long;
 #define FC_ACK_NO_PENDING	(FC_ACK_FRAME)
 
 #define MAC_RETRY_MAX 3
+#define MAC_CCA_RETRY_MAX 9
+//#define CHK_SUM
 
 void mac_task( void *pvParameters );
+// 215 40 on noin 5 ms
+#define MAC_CCA_TIME (random_generate(120)) + 40
+//#define MAC_ACK_TIME MAC_IFS*2
 
-#define MAC_CCA_TIME (random_generate(MAC_IFS)/32)+MAC_IFS
-#define MAC_ACK_TIME MAC_IFS*2
+//#define MAC_CCA_TIME (random_generate(MAC_IFS)/32)+MAC_IFS
+#define MAC_ACK_TIME 6000/128
 
 typedef enum
 {
 	MAC_INIT = 0,
 	MAC_ADHOC,
-#ifndef AD_HOC_STATE
 	MAC_SCAN,
-#endif
 #ifdef HAVE_RANGING
 	MAC_RANGING,
 #endif
@@ -172,17 +184,7 @@ typedef enum
 	MAC_TYPE_NONE =	15
 }mac_frame_type_t;
 
-typedef enum
-{
-	MAC_NONE = 0,
-	MAC_RECEIVE,
-	MAC_TIMER_ACK,
-	MAC_TIMER_CCA,
-	MAC_TRANSMIT,
-	MAC_CONTROL,
-	MAC_TIMER_NONE,
-	MAC_LOOP
-}mac_event_t;	
+
 
 typedef enum
 {
@@ -191,12 +193,19 @@ typedef enum
 	MAC_TX_CCA,
 	MAC_TX_BUSY
 }mac_tx_status_t;
-	
+
+#ifdef MAC_ENERGY_SCAN
+uint8_t hq_chan_cnt=0;
+uint8_t hq_chan_list[16];
+uint8_t hq_chan_index=0;
+#endif
+
+
 mac_mode_t mac_mode;
-/*mac_state_t mac_state;*/
 uint8_t mac_sequence;
 buffer_t *mac_tx_on_air;
 uint8_t mac_tx_retry;
+uint8_t mac_tx_cca_retry=0;
 
 /* flags */
 #define MAC_CLIENT 0x80
@@ -206,14 +215,18 @@ uint8_t mac_tx_retry;
 
 uint8_t mac_flags;
 
-mac_event_t mac_timer_event;
+volatile mac_event_t mac_timer_event;
+volatile mac_event_t mac_timer_active=0;
 
 xQueueHandle mac_events;
 
-buffer_t *mac_rx[STACK_BUFFERS_MAX];
-uint8_t mac_rx_rd, mac_rx_wr;
-buffer_t *mac_tx[STACK_BUFFERS_MAX];
+buffer_t *mac_rx[MAC_RING_BUFFER_SIZE_RX];
+volatile uint8_t mac_rx_rd, mac_rx_wr;
+buffer_t *mac_tx[MAC_RING_BUFFER_SIZE_TX];
 uint8_t mac_tx_rd, mac_tx_wr;
+#ifdef MALLFORMED_HEADERS
+extern uint8_t mallformed_headers_cnt;
+#endif
 
 #ifndef AD_HOC_STATE
 xList mac_ctl;
@@ -222,22 +235,31 @@ xList mac_ctl;
 uint8_t mac_pan[2];
 uint8_t mac_coord[8];
 uint8_t cur_channel = RF_DEFAULT_CHANNEL;
-//uint8_t rf_tx_power = RF_DEFAULT_POWER;
 
+void push_bl_event(buffer_t *b);
+void push_ttl_update_event(buffer_t *b);
 void mac_rx_add(buffer_t *buf);
-void mac_tx_add(buffer_t *buf);
+portCHAR mac_tx_add(buffer_t *b);
 void mac_tx_push(buffer_t *buf);
 buffer_t *mac_tx_pull(void);
 buffer_t *mac_rx_pull(void);
 void mac_data_up(buffer_t *buf);
 mac_tx_status_t mac_buffer_out(buffer_t *buf);
 void mac_push(buffer_t *b);
+portCHAR check_mac_rx_size(void);
+
 
 mac_event_t mac_control(buffer_t **ppbuf);
 void mac_adhoc(mac_event_t event, buffer_t *buf);
+void mac_scan(mac_event_t curr_event, buffer_t *buf);
+
+#ifdef CHK_SUM
+void mac_calc_chk_sum(buffer_t *buf);
+uint8_t mac_check_chk_sum(buffer_t *buf);
+#endif
+
 
 #ifndef AD_HOC_STATE
-void mac_scan(mac_event_t curr_event, buffer_t *buf);
 void mac_client(mac_event_t curr_event, buffer_t *buf);
 #ifdef MAC_COORDINATOR
 void mac_coord(mac_event_t curr_event, buffer_t *buf);
@@ -269,16 +291,16 @@ void mac_timer_callback(void);
 
 portCHAR mac_set_channel(uint8_t new_channel)
 {
-	rf_rx_disable();
-	
+	portCHAR retval;
+	EA = 0;
+	retval = pdFALSE;
 	if(rf_channel_set(new_channel))
 	{
 		cur_channel = new_channel;
-		return pdTRUE;
+		retval = pdTRUE;
 	}
-	
-	rf_rx_enable();
-	return pdFALSE;
+	EA = 1;
+	return retval;
 }
 
 uint8_t mac_current_channel(void)
@@ -295,7 +317,7 @@ buffer_t *mac_rx_pull(void)
 	if (tmp == mac_rx_wr) return 0;
 	b = mac_rx[tmp];
 	mac_rx[tmp++] = 0;
-	if (tmp >= STACK_BUFFERS_MAX) tmp = 0;
+	if (tmp >= MAC_RING_BUFFER_SIZE_RX) tmp = 0;
 	mac_rx_rd = tmp;
 	
 	return b;
@@ -309,50 +331,119 @@ buffer_t *mac_tx_pull(void)
 	if (tmp == mac_tx_wr) return 0;
 	b = mac_tx[tmp];
 	mac_tx[tmp++] = 0;
-	if (tmp >= STACK_BUFFERS_MAX) tmp = 0;
+	if (tmp >= MAC_RING_BUFFER_SIZE_TX) tmp = 0;
 	mac_tx_rd = tmp;
-	
 	return b;
 }
 
-void mac_tx_push(buffer_t *b)
-{
-	uint8_t tmp = mac_tx_rd;
-
-	if (tmp == 0) tmp = STACK_BUFFERS_MAX - 1;
-	else tmp--;
-		
-	mac_tx[tmp] = b;
-	mac_tx_rd = tmp;
-}
-
-void mac_tx_add(buffer_t *b)
+portCHAR mac_tx_add(buffer_t *b)
 {
 	uint8_t tmp = mac_tx_wr;
 	
-	mac_tx[tmp++] = b;
-	b->to = MODULE_MAC_15_4;
-	if (tmp >= STACK_BUFFERS_MAX) tmp = 0;
-	mac_tx_wr = tmp;
+	tmp++;
+	if (tmp >= MAC_RING_BUFFER_SIZE_TX) 
+	{
+		tmp = 0;
+	}
+	if(tmp != mac_tx_rd)
+	{
+		b->to = MODULE_MAC_15_4;
+		mac_tx[mac_tx_wr] = b;
+		mac_tx_wr = tmp;
+	}
+	else
+	{	/* buffer full, tx overrun error */
+		stack_buffer_free(b);
+		return pdFALSE;
+	}
+	return pdTRUE;
 }
 
 void mac_rx_add(buffer_t *b)
 {
 	uint8_t tmp = mac_rx_wr;
 	
-	mac_rx[tmp++] = b;
-	if (tmp >= STACK_BUFFERS_MAX) tmp = 0;
-	mac_rx_wr = tmp;
+	tmp++;
+	if (tmp >= MAC_RING_BUFFER_SIZE_RX) 
+	{
+		tmp = 0;
+	}
+	if(tmp != mac_rx_rd)
+	{
+		mac_rx[mac_rx_wr] = b;
+		mac_rx_wr = tmp;
+	}
+	else
+	{	/* buffer full, error */
+
+	}
+}
+
+portCHAR check_mac_rx_size(void)
+{
+	uint8_t tmp = mac_rx_wr;
+	tmp++;
+
+	if (tmp >= MAC_RING_BUFFER_SIZE_RX) 
+	{
+		tmp = 0;
+	}
+
+	if(tmp != mac_rx_rd)
+	{
+		return pdTRUE;
+	}
+	else
+	{	/* buffer full, error */
+		return pdFALSE;
+	}
 }
 
 /*
 	Protocol part for core
 	*/
+xTaskHandle mac_task_handle;
+
+portCHAR mac_mem_alloc(void)
+{
+	mac_rx_rd = mac_rx_wr = 0;
+	mac_tx_rd = mac_tx_wr = 0;
+	mac_pan[0] = 0xFF;
+	mac_pan[1] = 0xFF;
+	mac_timer_event = MAC_TIMER_NONE;
+	mac_events = xQueueCreate( 20, sizeof( mac_event_t ) );
+	xTaskCreate(mac_task, "MAC", configMAXIMUM_STACK_SIZE, NULL, (tskIDLE_PRIORITY + 3 ), &mac_task_handle);
+	//rf_init();
+	return pdTRUE;
+}
+/**
+ *  Enable ED-scan.
+ * 
+ * Working only when MAC_ENERGY_SCAN defined
+ */
+void mac_start_ed_scan(void)
+{
+	
+	mac_event_t mac_new_event = MAC_ED_SCAN;
+	debug("Start ED\r\n");
+	xQueueSend(mac_events, &mac_new_event, 0);
+}
+/**
+ *  GW scan with channel change.
+ *
+ *  Change next channel and create & send ROUTER SOLICATION MESSAGE
+ */
+void mac_gw_discover(void)
+{
+	mac_event_t mac_new_event = MAC_GW_DIS;
+	debug("GW dis\r\n");
+	xQueueSend(mac_events, &mac_new_event, 0);
+}
+
 
 portCHAR mac_init(buffer_t *buf)
 {
 	buf;
-	debug("MAC init.\r\n");
 #ifndef AD_HOC_STATE
 #ifdef MAC_COORDINATOR
 	mac_mode = MAC_INIT;
@@ -362,19 +453,7 @@ portCHAR mac_init(buffer_t *buf)
 	vListInitialise(&mac_ctl);
 #else
 	mac_mode = MAC_ADHOC;
-#endif
-	mac_rx_rd = mac_rx_wr = 0;
-	mac_tx_rd = mac_tx_wr = 0;
-	mac_pan[0] = 0xFF;
-	mac_pan[1] = 0xFF;
-	mac_events = xQueueCreate( 16, sizeof( mac_event_t ) );
-	mac_timer_event = MAC_TIMER_NONE;
-	
-	debug("RF init.\r\n");
-	rf_init();
-	debug("Launch task.\r\n");
-	xTaskCreate(mac_task, "MAC", configMAXIMUM_STACK_SIZE, NULL, (tskIDLE_PRIORITY + 3 ), (xTaskHandle *) NULL );
-	
+#endif	
 	return pdTRUE;
 }
 
@@ -383,13 +462,28 @@ portCHAR mac_handle( buffer_t *buf )
 	switch (buf->dir)
 	{
 			case BUFFER_UP:
-				debug("MAC: up\r\n");
+				debug("MAC: U\r\n");
 				break;
 			case BUFFER_DOWN:
-				mac_tx_add(buf);
+				debug("MAC: D\r\n");
+				if(mac_mode == MAC_SCAN)
 				{
-					mac_event_t mac_new_event = MAC_TRANSMIT;
-					xQueueSend(mac_events, &mac_new_event, 0);
+					stack_buffer_free(buf);
+				}
+				else
+				{
+
+#ifdef CHK_SUM
+					mac_calc_chk_sum(buf);
+#endif
+#ifdef HAVE_AES
+					aes_crypt(0 , buf);
+#endif
+					mac_tx_add(buf);
+					{
+						mac_event_t mac_new_event = MAC_TRANSMIT;
+						xQueueSend(mac_events, &mac_new_event, 0);
+					}
 				}
 				return pdTRUE;
 				
@@ -400,6 +494,7 @@ portCHAR mac_handle( buffer_t *buf )
 	return pdFALSE;
 }
 
+
 portCHAR mac_check( buffer_t *buf )
 {
 	buf;
@@ -409,7 +504,7 @@ portCHAR mac_check( buffer_t *buf )
 #ifdef HAVE_RF_ERROR
 extern uint8_t rf_error;
 #endif
-
+#define HW_ADDR_DEC
 /*
 	Task and functionality part
 	*/
@@ -425,6 +520,7 @@ void mac_task( void *pvParameters )
 	buffer_t *buf=0;
 	mac_event_t curr_event;
 	portTickType xLastWakeTime=0;
+	rf_init();
 
 	pvParameters;
 	debug("Mac task start\r\n");
@@ -439,8 +535,11 @@ void mac_task( void *pvParameters )
 			vTaskDelay(200/portTICK_RATE_MS);
 		}
 	}
+	
+	//vTaskDelay(2000/portTICK_RATE_MS);
+	mac_sequence = mac_long.address[0];
 	debug("Mac task go\r\n");
-	{
+	/*{
 		uint8_t i;
 		uint8_t tmp_8;	
 		tmp_8= (mac_sequence % 15) + 8;
@@ -448,20 +547,39 @@ void mac_task( void *pvParameters )
 		{
 			mac_sequence += random_generate(16);
 		}
-	}
+	}*/
+	/*debug("Set address.\r\n");
+	mac_long.address[8] = 0xff;
+	mac_long.address[9] = 0xff;
+
+	debug_address(&(mac_long));
 	debug("Set address.\r\n");
-	rf_set_address(&mac_long);
+	rf_set_address(&mac_long);*/
 #ifdef HAVE_NRP
 	debug("Softack on.\r\n");
-	rf_address_decoder_mode(RF_SOFTACK_MONITOR);
+	//rf_address_decoder_mode(RF_SOFTACK_MONITOR);
+	rf_address_decoder_mode(RF_DECODER_ON);
+#else
+#ifdef MAC_SOFTACK
+	debug("Decoder off.\r\n");
+	rf_address_decoder_mode(RF_SOFTACK_CLIENT);
 #else
 	debug("Decoder on.\r\n");
 	rf_address_decoder_mode(RF_DECODER_ON);
 #endif
+#endif
+	
+	mac_long.address[8] = 0xff;
+	mac_long.address[9] = 0xff;
+
 	rf_rx_enable();
+#ifdef MAC_ENERGY_SCAN
+	mac_start_ed_scan();
+#endif
+
 	for (;;)
 	{
-		if(xQueueReceive(mac_events, &(curr_event),5000 / portTICK_RATE_MS) == pdTRUE)
+		if(xQueueReceive(mac_events, &(curr_event),(portTickType) 500 / portTICK_RATE_MS) == pdTRUE)
 		{
 #ifdef HAVE_RF_ERROR
 			if (rf_error)
@@ -470,14 +588,7 @@ void mac_task( void *pvParameters )
 				debug_hex(rf_error);
 				rf_error = 0;
 			}
-#endif
-			rf_rx_callback(0);
-			buf = mac_rx_pull();
-			if (buf != 0)
-			{
-				if (curr_event != MAC_RECEIVE) xQueueSend(mac_events, &curr_event, 0);
-				curr_event = MAC_RECEIVE;
-			}			
+#endif		
 
 			switch(curr_event)
 			{
@@ -487,36 +598,71 @@ void mac_task( void *pvParameters )
 					break;
 #endif					
 				case MAC_TRANSMIT:
+					debug("TX\r\n");
 					if (mac_timer_event != MAC_TIMER_NONE)
 					{
-						curr_event = MAC_LOOP;
+						curr_event = MAC_NONE;
 					}
 					else
 					{
 						buf = mac_tx_pull();
+						if(buf)
+						{
+							mac_tx_on_air=buf;
+							buf=0;
+							curr_event = MAC_NONE;
+							mac_timer_launch(MAC_TIMER_CCA);
+						}
+						else
+						{
+							curr_event = MAC_NONE;
+						}
 					}
 					break;
 					
 				case MAC_RECEIVE:
+					debug("RX\r\n");
+					buf = 0;
+					portDISABLE_INTERRUPTS();
+					buf = mac_rx_pull();
+					portENABLE_INTERRUPTS();
+					if(buf == 0)
+					{
+						curr_event = MAC_LOOP;
+					}
+					break;
+
+				case MAC_ED_SCAN:
+					buf = 0;
+					curr_event = MAC_ED_SCAN;
+					mac_mode = MAC_SCAN;
+					break;
+
+				case MAC_GW_DIS:
+					curr_event == MAC_NONE;
+#ifndef MAC_ENERGY_SCAN
+					if(cur_channel==26)
+						cur_channel=11;
+					else
+						cur_channel++;
+					rf_channel_set(cur_channel);
+					gw_discover();
+#endif
 					break;
 					
 				default:
 					break;
-			}	/*end event switch*/			
-		}/* end event received */
-		else curr_event = MAC_LOOP;
-		
-		while(curr_event != MAC_NONE)
-		{
+			}	/*end event switch*/
+
 			switch(mac_mode)
 			{
 				case MAC_ADHOC:
 					mac_adhoc(curr_event, buf);
 					break;
-#ifndef AD_HOC_STATE
 				case MAC_SCAN:
 					mac_scan(curr_event, buf);
-					break;					
+					break;
+#ifndef AD_HOC_STATE					
 				case MAC_CLIENT:
 					mac_client(curr_event, buf);
 					break;
@@ -550,61 +696,70 @@ void mac_task( void *pvParameters )
 			}/* end mode switch */
 			buf = 0;
 			curr_event = MAC_NONE;
-			
-			/* look up lists */
 			if ((mac_timer_event == MAC_TIMER_NONE) && (mac_tx_on_air == 0))
 			{
 				buf = mac_tx_pull();
-				if (buf != 0)	curr_event = MAC_TRANSMIT;
+				if(buf)
+				{
+					mac_tx_on_air=buf;
+					mac_tx_cca_retry=0;
+					buf=0;
+					mac_timer_launch(MAC_TIMER_CCA);
+				}
 			}
-			else if ((mac_timer_event == MAC_TIMER_NONE) && (mac_tx_on_air != 0))
-			{
-				curr_event = MAC_TIMER_CCA;
-			}
-		}	/*end event loop*/
-#ifdef HAVE_DEBUG
-		if ((RXFIFOCNT & 0xFF) != 0)
-		{
-			debug("F:");
-			debug_int(RXFIFOCNT & 0xFF);
-			debug("\r\n");
-		}
-		if ((DMAARM & 1) == 0)
-		{
-			debug("D!");
-		}
-#endif
+		}/* end event received */
 	} /*end task loop*/
 }
 
-
+/**
+ *  MAC ad-hoc mode packet handle.
+ *
+ */
 void mac_adhoc(mac_event_t curr_event, buffer_t *buf)
 {
 	mac_frame_type_t ftype;
-	
 /*	debug("ADHOC:");
 	debug_int(curr_event);*/
 	switch (curr_event)
 	{
+
+			case MAC_ACK_RX:
+				mac_timer_stop();
+				mac_tx_retry = 0;
+				mac_timer_event = MAC_TIMER_NONE;
+				push_ttl_update_event(mac_tx_on_air);
+				mac_tx_on_air = 0;
+				buf=0;
+				break;
+
 			case MAC_RECEIVE:
 				ftype = mac_buffer_parse(buf); 
 				switch(ftype)
 				{
 					case MAC_DATA:
+#ifdef CHK_SUM
+						if(mac_check_chk_sum(buf) == 1)
+						{
+							mac_data_up(buf);
+							debug("d\r\n");
+						}
+						else
+						{
+#ifdef MALLFORMED_HEADERS
+							mallformed_headers_cnt++;
+#endif
+							debug("chk err\r\n");
+							stack_buffer_free(buf);
+						}
+
+#else
 						mac_data_up(buf);
-						debug("d");
-						break;
-					case MAC_ACK:
-						mac_timer_stop();
-						stack_buffer_free(mac_tx_on_air);
-						stack_buffer_free(buf);
-						mac_tx_retry = 0;
-						mac_tx_on_air = 0;
-						debug("a");
+						debug("d\r\n");
+#endif
 						break;
 					default:
 						/*debug_hex(ftype);*/
-						debug("d!");
+						debug("d!\r\n");
 						stack_buffer_free(buf);
 				}
 				buf = 0;
@@ -614,18 +769,23 @@ void mac_adhoc(mac_event_t curr_event, buffer_t *buf)
 				mac_tx_retry++;
 				if (mac_tx_retry > MAC_RETRY_MAX)
 				{
+					mac_timer_stop();
+					mac_tx_retry = 0;
 					buf = mac_tx_on_air;
 					mac_tx_on_air = 0;
 					buf->buf_ptr = (buf->buf_end - buf->options.lowpan_compressed );
-					ip_broken_link_notify(buf, 0);
-					//stack_buffer_free(buf);
+					#ifdef HAVE_AES
+						aes_crypt(1 , buf);
+					#endif
+					push_bl_event(buf);
 					buf = 0;
-					mac_tx_retry = 0;
-					mac_timer_stop();
-					debug("TX fail.\r\n");
+					//debug("TX fail.\r\n");
 					return;			
 				}				
 				debug("RTR");
+				mac_timer_launch(MAC_TIMER_CCA);
+				buf=0;
+				break;
 				
 			case MAC_TIMER_CCA:	/*retransmit*/
 				buf = mac_tx_on_air;
@@ -637,22 +797,91 @@ void mac_adhoc(mac_event_t curr_event, buffer_t *buf)
 					{
 						case MAC_TX_OK:
 							mac_tx_on_air = 0;
-							mac_timer_stop();
-							stack_buffer_free(buf);
+							//mac_timer_stop();
+							mac_timer_event = MAC_TIMER_NONE;
+							
 							mac_tx_retry = 0;
+							stack_buffer_free(buf);
 							break;
 						case MAC_TX_OK_ACK:
+							debug("WACK\r\n");
 							mac_tx_on_air = buf;
 							mac_timer_launch(MAC_TIMER_ACK);
 							break;
 						case MAC_TX_BUSY:
 							debug("MAC TX busy.\r\n");
+							mac_tx_cca_retry++;
+							if(mac_tx_cca_retry > MAC_CCA_RETRY_MAX)
+							{
+								mac_tx_cca_retry=0;
+								mac_tx_retry = 0;
+								mac_tx_on_air = 0;
+								mac_timer_event = MAC_TIMER_NONE;
+#ifdef MAC_ENERGY_SCAN
+								debug("chan change\r\n");
+								stack_buffer_free(buf);
+								mac_start_ed_scan();
+								break;
+#else
+								debug("CCA er\r\n");
+
+								//stack_buffer_free(buf);
+								//break;
+
+								buf->buf_ptr = (buf->buf_end - buf->options.lowpan_compressed );
+								#ifdef HAVE_AES
+								aes_crypt(1 , buf);
+								#endif
+								push_bl_event(buf);
+								buf = 0;
+								return;	
+#endif
+							}
 							mac_tx_on_air = buf;
 							mac_timer_launch(MAC_TIMER_CCA);
 							break;
 						case MAC_TX_CCA:
+
+							mac_tx_cca_retry++;
+							if(mac_tx_cca_retry > MAC_CCA_RETRY_MAX)
+							{
+								mac_tx_cca_retry=0;
+								mac_tx_on_air = 0;
+								mac_timer_event = MAC_TIMER_NONE;
+								mac_tx_retry = 0;
+#ifdef MAC_ENERGY_SCAN
+								debug("chan change\r\n");
+								
+								stack_buffer_free(buf);
+								mac_start_ed_scan();
+								break;
+#else
+								debug("CCA er\r\n");
+								
+								//stack_buffer_free(buf);
+								//break;
+//#if 0
+								/*control_message_t *ptr;
+								ptr = ( control_message_t*) buf->buf;
+								ptr->message.ip_control.message_id = MAC_CCA_ERR;
+								push_to_app(buf);
+								buf=0;*/
+
+
+								buf->buf_ptr = (buf->buf_end - buf->options.lowpan_compressed );
+								#ifdef HAVE_AES
+								aes_crypt(1 , buf);
+								#endif
+								push_bl_event(buf);
+								buf = 0;
+								return;	
+//#endif
+#endif
+							}
+
+
 						default:
-							debug("MAC TX CCA.\r\n");
+							//debug("MAC TX CCA.\r\n");
 							mac_tx_on_air = buf;
 							mac_timer_launch(MAC_TIMER_CCA);
 					}
@@ -662,9 +891,110 @@ void mac_adhoc(mac_event_t curr_event, buffer_t *buf)
 			default:
 				break;
 	}
-	if (buf) stack_buffer_free(buf);
+	if (buf)
+	{
+		stack_buffer_free(buf); 
+	}
 }
 
+/**
+ *  MAC scan mode function.
+ *
+ *  When MAC_ENERGY_SCAN is defined (GW device) this function analyze all 16 channel Energy level and select first free channel.
+ */
+void mac_scan(mac_event_t curr_event, buffer_t *buf)
+{
+	#ifdef MAC_ENERGY_SCAN
+	uint8_t j=0;
+	uint16_t i;
+	uint8_t chan = 11;
+	int8_t max_rssi = -128, rssi=-128;
+	
+	if(hq_chan_cnt == hq_chan_index)
+	{
+		debug(" Full Scan\r\n");
+		hq_chan_cnt = hq_chan_index = 0;
+		for(j=0; j<16; j++)
+		{
+			rf_channel_set(chan);
+			pause_us(500);
+			
+			i=0;
+			max_rssi = -128;
+			while(i++ < 500)
+			{
+				rssi = rf_analyze_rssi();
+				if(rssi < 0)
+				{
+					if(rssi > max_rssi)
+					{
+						max_rssi = rssi;
+					}
+					
+				}
+				
+				pause_us(500);
+			}
+			if(max_rssi < -92)
+			{
+				hq_chan_list[hq_chan_cnt] = chan;
+				hq_chan_cnt++;
+			}
+#ifdef HAVE_DEBUG
+			debug_int(max_rssi);
+			debug(" dbm\r\n");
+#endif
+			vTaskDelay(4);
+			chan++;
+		}
+		if(hq_chan_cnt)
+		{
+#ifdef HAVE_DEBUG
+			debug_int(hq_chan_cnt);
+			debug(" chan cnt\r\n");
+			debug_int(hq_chan_list[hq_chan_index]);
+			debug(" start channel\r\n");
+#endif
+			hq_chan_index=1;
+			rf_channel_set(hq_chan_list[0]);
+			cur_channel = hq_chan_list[0];
+			pause_us(500);
+			
+#ifdef HAVE_NRP
+			gw_advertisment();
+			nrp_channel_notify();
+#endif
+		}
+	}
+	else
+	{
+#ifdef HAVE_DEBUG
+			debug_int(hq_chan_list[hq_chan_index]);
+			debug(" new channel\r\n");
+#endif
+			rf_channel_set(hq_chan_list[hq_chan_index]);
+			cur_channel = hq_chan_list[hq_chan_index];
+			hq_chan_index++;
+			pause_us(500);
+			
+#ifdef HAVE_NRP
+			gw_advertisment();
+			nrp_channel_notify();
+#endif
+	}
+#endif
+	#ifndef AD_HOC_STATE
+#ifdef MAC_COORDINATOR
+	mac_mode = MAC_INIT;
+#else
+	mac_mode = MAC_SCAN;	/*clients start in scan*/
+#endif
+#else
+	mac_mode = MAC_ADHOC;
+#endif
+	curr_event = MAC_NONE;
+	buf; 
+}
 #ifndef AD_HOC_STATE
 mac_mode_t mac_command(buffer_t *buf, uint8_t coordinator)
 {
@@ -672,23 +1002,7 @@ mac_mode_t mac_command(buffer_t *buf, uint8_t coordinator)
 }
 
 
-void mac_scan(mac_event_t curr_event, buffer_t *buf)
-{
-	switch (curr_event)
-	{
-			case MAC_RECEIVE:
-				break;
-				
-			case MAC_TRANSMIT:
-				/*TODO: error NOT_ASSOCIATED*/
-				mac_tx_add(buf);
-				buf = 0;
-				break;
-			default:
-				break;
-	}
-	if (buf) stack_buffer_free(buf);
-}
+
 
 void mac_client(mac_event_t curr_event, buffer_t *buf)
 {
@@ -734,10 +1048,10 @@ void mac_client(mac_event_t curr_event, buffer_t *buf)
 					buf = 0;
 					mac_tx_retry = 0;
 					mac_timer_stop();
-					debug("TX fail.\r\n");
+					//debug("TX fail.\r\n");
 					return;			
 				}				
-				debug("RTR");
+				//debug("RTR");
 				
 			case MAC_TIMER_CCA:	/*retransmit*/
 				buf = mac_tx_on_air;
@@ -758,13 +1072,13 @@ void mac_client(mac_event_t curr_event, buffer_t *buf)
 							mac_timer_launch(MAC_TIMER_ACK);
 							break;
 						case MAC_TX_BUSY:
-							debug("MAC TX busy.\r\n");
+							//debug("MAC TX busy.\r\n");
 							mac_tx_on_air = buf;
 							mac_timer_launch(MAC_TIMER_CCA);
 							break;
 						case MAC_TX_CCA:
 						default:
-							debug("MAC TX CCA.\r\n");
+							//debug("MAC TX CCA.\r\n");
 							mac_tx_on_air = buf;
 							mac_timer_launch(MAC_TIMER_CCA);
 					}
@@ -813,17 +1127,13 @@ void mac_coord(mac_event_t curr_event, buffer_t *buf)
 
 #endif /*AD_HOC_STATE*/
 
-
-
-extern uint8_t update_neighbour_table(addrtype_t type, address_t address, uint8_t last_lqi, uint8_t last_sqn, uint8_t remove);
-
 /* 
 	General header functions 
 	*/
 mac_frame_type_t mac_buffer_parse(buffer_t *buf)
 {
 	uint8_t *ptr;
-	uint8_t seq, i;
+	uint8_t seq;
 	uint16_t fc,tmp;
 	mac_frame_type_t type = MAC_TYPE_NONE;
 
@@ -838,7 +1148,6 @@ mac_frame_type_t mac_buffer_parse(buffer_t *buf)
 	seq = *ptr++;
 	
 	type = (mac_frame_type_t) ((fc & FC_FRAME_TYPE_MASK) >> FC_FRAME_TYPE_SHIFT); /* detect frametype */
-/*		response->ack_req = (fc[0] &  FC_ACK);*/
 	
 	tmp = (fc & FC_DST_MODE);
 	if(tmp == FC_DST_ADDR_NONE)
@@ -854,10 +1163,12 @@ mac_frame_type_t mac_buffer_parse(buffer_t *buf)
 	{
 		/* Read dst pan */
 		buf->dst_sa.addr_type = ADDR_802_15_4_PAN_LONG;
-		for (i = 0; i < 8 ; i++)
+		memcpy(buf->dst_sa.address,ptr, 8);
+		ptr += 8;
+		/*for (i = 0; i < 8 ; i++)
 		{
 			buf->dst_sa.address[i] = *ptr++;
-		}
+		}*/
 	}
 	if(tmp == FC_DST_16_BITS)
 	{
@@ -892,10 +1203,12 @@ mac_frame_type_t mac_buffer_parse(buffer_t *buf)
 	if(tmp == FC_SRC_64_BITS)
 	{
 		buf->src_sa.addr_type = ADDR_802_15_4_PAN_LONG;
-		for (i = 0; i < 8 ; i++)
+		memcpy(buf->src_sa.address,ptr, 8);
+		ptr += 8;
+		/*for (i = 0; i < 8 ; i++)
 		{
 			buf->src_sa.address[i] = *ptr++;
-		}
+		}*/
 	}
 	if(tmp== FC_SRC_16_BITS)
 	{
@@ -905,24 +1218,24 @@ mac_frame_type_t mac_buffer_parse(buffer_t *buf)
 		buf->src_sa.address[0] = *ptr++;
 		buf->src_sa.address[1] = *ptr++;
 	}
+	/*if(buf->src_sa.addr_type != ADDR_NONE)
+	{
+		buf->link_sa.addr_type = buf->src_sa.addr_type;
+		memcpy(buf->link_sa.address, buf->src_sa.address,10);
+	}*/
+
 	buf->buf_ptr = (uint16_t) ptr;
 	buf->buf_ptr -= (uint16_t) buf->buf;
-	
-	/*check sequence*/
-	if ( (buf->src_sa.addr_type != ADDR_NONE) && (type == MAC_DATA) &&
-			(update_neighbour_table(buf->src_sa.addr_type, buf->src_sa.address, 
-															buf->options.rf_lqi, seq, UPDATE_NEIGHBOUR) == 0) )
+	buf->options.lowpan_compressed = seq;
+
+
+	if(fc & FC_SEC && type == MAC_DATA)
 	{
-		debug("Drop:seq.\r\n");
+#ifdef HAVE_AES
+		aes_crypt(1 , buf);
+#else
 		type = MAC_TYPE_NONE;
-	}
-	if ((type == MAC_ACK))
-	{
-		 if ((mac_tx_on_air == 0) || (seq != (mac_sequence - 1)))
-		 {
-			 type = MAC_TYPE_NONE;
-			 debug("Drop:ack.\r\n");
-		 }
+#endif
 	}
 	return type;
 }
@@ -936,12 +1249,16 @@ mac_frame_type_t mac_buffer_parse(buffer_t *buf)
 uint8_t mac_header_generate(buffer_t *buf)
 {
 	uint8_t header_size = 3; /* including Frame Control and sqn */
-	uint8_t i;
 	uint8_t address_length;
 	uint8_t *ptr;
 	uint16_t fc;
 	
 	fc = FC_DATA_FRAME;
+
+#ifdef HAVE_AES
+	fc |= FC_SEC;
+#endif
+
 
 	if (stack_check_broadcast(buf->dst_sa.address, buf->dst_sa.addr_type) == pdTRUE)
 	{
@@ -950,10 +1267,7 @@ uint8_t mac_header_generate(buffer_t *buf)
 	if(buf->dst_sa.addr_type == ADDR_BROADCAST)
 	{
 		buf->dst_sa.addr_type = ADDR_802_15_4_PAN_SHORT;
-		for (i = 0; i < 4; i++)
-		{
-			buf->dst_sa.address[i]  = 0xff;
-		}
+		memset(buf->dst_sa.address, 0xff, 4);
 	}
 	else
 	{
@@ -984,10 +1298,7 @@ uint8_t mac_header_generate(buffer_t *buf)
 			address_length=8;
 			fc |= FC_DST_64_BITS;
 			header_size += 8;
-			for(i=0;i<8;i++)
-			{
-				buf->dst_sa.address[i] = mac_coord[i];
-			}
+			memcpy(buf->dst_sa.address,mac_coord, 8);
 		}
 		fc |= FC_INTRA_PAN;
 	}
@@ -1024,6 +1335,8 @@ uint8_t mac_header_generate(buffer_t *buf)
 		fc |= FC_SRC_64_BITS;
 		header_size +=10;
 		buf->src_sa.addr_type = ADDR_802_15_4_PAN_LONG;
+		buf->src_sa.address[8] = mac_pan[0];
+		buf->src_sa.address[9] = mac_pan[1];
 		memcpy(buf->src_sa.address, mac_long.address, 8);
 	}
 	
@@ -1040,7 +1353,11 @@ uint8_t mac_header_generate(buffer_t *buf)
 	
 	*ptr++ = fc; 	/* FCF*/
 	*ptr++ = fc>>8;
-	*ptr++ = mac_sequence++;		/*packet sequence number*/
+	*ptr++ = mac_sequence;		/*packet sequence number*/
+	if(mac_sequence==0xff)
+		mac_sequence=0;
+	else
+		mac_sequence++;
 	
 	/* Craete address field */
 	/* Destination address */
@@ -1078,7 +1395,6 @@ uint8_t *mac_address_push_pan(uint8_t *ptr, sockaddr_t *addr)
 
 uint8_t *mac_address_push(uint8_t *ptr, sockaddr_t *addr)
 {
-	uint8_t i;
 	switch (addr->addr_type)
 	{
 		case ADDR_802_15_4_PAN_SHORT:
@@ -1086,10 +1402,8 @@ uint8_t *mac_address_push(uint8_t *ptr, sockaddr_t *addr)
 				*ptr++ = addr->address[1];
 				break;
 		case ADDR_802_15_4_PAN_LONG:
-				for (i=0; i<8; i++)
-				{
-					*ptr++ = addr->address[i];
-				}
+				memcpy(ptr,addr->address, 8);
+				ptr +=8;
 				break;
 				
 #ifndef AD_HOC_STATE
@@ -1106,27 +1420,106 @@ void mac_rx_push(void);
 void mac_rx_push(void)
 {
 	mac_event_t mac_new_event = MAC_RECEIVE;
-	xQueueSendFromISR(mac_events, &mac_new_event, pdFALSE);			
+	xQueueSendFromISR(mac_events, &mac_new_event, pdFALSE);		
 }
 
+void mac_event_push(void);
+void mac_event_push(void)
+{
+	mac_event_t mac_new_event = MAC_ACK_RX;
+	xQueueSendFromISR(mac_events, &mac_new_event, pdFALSE);
+}
 void mac_push(buffer_t *b)
 {
 	b->to = MODULE_MAC_15_4;
 	b->dir = BUFFER_UP;
 	b->from = MODULE_NONE;
-	
 	mac_rx_add(b);
 }
-
-void mac_data_up(buffer_t *b)
+/**
+ * Push Neighbour & Routing table TTL update event to cIPV module.
+ *
+ * \param buf indicates pointer for buffer structure.
+ */
+void push_ttl_update_event(buffer_t *b)
 {
-	b->to = MODULE_NONE;
+	b->to = MODULE_CIPV6;
 	b->dir = BUFFER_UP;
 	b->from = MODULE_MAC_15_4;
-	
+	b->options.handle_type = HANDLE_TTL_UPDATE;
 	stack_buffer_push(b);
 }
-
+/**
+ * Push Broken Link event to cIPV module.
+ *
+ * When ACK not received after 4 re-tx.
+ * 
+ * \param buf indicates pointer for buffer structure.
+ */
+void push_bl_event(buffer_t *b)
+{
+	b->to = MODULE_CIPV6;
+	b->dir = BUFFER_UP;
+	b->from = MODULE_MAC_15_4;
+	b->options.handle_type = HANDLE_BROKEN_LINK;
+	stack_buffer_push(b);
+}
+/**
+ * RF RX interrupt ACK handle.
+ *
+ * Function check ACK status in the MAC.
+ * 
+ * \param sqn ack sequency number
+ * 
+ */
+void ack_handle(uint8_t sqn)
+{
+	if(mac_timer_event == MAC_TIMER_ACK && mac_timer_active) //T4CTL
+	{
+		if (mac_tx_on_air)
+		{
+			if(mac_sequence == 0x00 && sqn == 0xff)
+			{
+				mac_timer_event = MAC_ACK_RX;
+			}
+			else if(mac_sequence != 0x00 && (sqn == (mac_sequence - 1)))
+			{
+				mac_timer_event  = MAC_ACK_RX;
+			}
+			
+			if(mac_timer_event  == MAC_ACK_RX)
+			{
+				portBASE_TYPE prev_task = pdFALSE;
+				mac_timer_active=0;
+				prev_task = xQueueSendFromISR(mac_events, &mac_timer_event, prev_task);
+				mac_timer_stop();
+			}
+		}
+	}
+}
+/**
+ * Push Data buffer to upper layer from MAC.
+ *
+ * \param buf indicates pointer for buffer structure.
+ */
+void mac_data_up(buffer_t *b)
+{
+	b->to = MODULE_CIPV6;
+	b->dir = BUFFER_UP;
+	b->from = MODULE_MAC_15_4;
+	b->options.handle_type = HANDLE_DEFAULT;
+	stack_buffer_push(b);
+}
+/**
+ * Buffer send API for MAC module.
+ *
+ * \param buf indicates pointer for buffer structure.
+ * 
+ * \return MAC_TX_OK_ACK, TX ok waiting ACK
+ * \return MAC_TX_OK TX complete
+ * \return MAC_TX_BUSY, channel busy
+ * \return MAC_TX_CCA, channel not free
+ */
 mac_tx_status_t mac_buffer_out(buffer_t *buf)
 {
 	uint8_t ack = 0;
@@ -1151,6 +1544,7 @@ mac_tx_status_t mac_buffer_out(buffer_t *buf)
 	{
 		case pdTRUE:
 			mac_tx_on_air = buf;
+			mac_tx_cca_retry=0;
 			if (ack) return MAC_TX_OK_ACK;
 			else return MAC_TX_OK;
 		case pdTRUE+1:
@@ -1167,6 +1561,7 @@ void mac_timer_launch (mac_event_t event)
 {
 	timer_mac_stop();
 	mac_timer_event = event;
+	
 	switch(event)
 	{
 		case MAC_TIMER_CCA:
@@ -1179,19 +1574,71 @@ void mac_timer_launch (mac_event_t event)
 		default:
 			break;	
 	}
+	mac_timer_active=1;
 }
+
+#ifdef CHK_SUM
+void mac_calc_chk_sum(buffer_t *buf)
+{
+	uint16_t chk_sum=0;
+	uint8_t i,*ptr;
+
+	ptr = buf->buf + buf->buf_ptr;
+	for(i=buf->buf_ptr; i< buf->buf_end; i++)
+	{
+		chk_sum += *ptr++;
+	}
+	*ptr++ = (chk_sum >> 8);		
+	*ptr++ = (uint8_t) chk_sum;
+	buf->buf_end += 2;
+}
+
+uint8_t mac_check_chk_sum(buffer_t *buf)
+{
+	uint16_t chk_sum=0, result=0;
+	uint8_t i,*ptr;
+
+	ptr = buf->buf + (buf->buf_end - 2);
+	chk_sum = *ptr++;
+	chk_sum <<= 8;
+	chk_sum += *ptr++;
+
+	buf->buf_end -= 2;
+	ptr = buf->buf + buf->buf_ptr;
+	for(i=buf->buf_ptr; i< buf->buf_end; i++)
+	{
+		result += *ptr++;
+	}
+	if(chk_sum == result)
+	{
+		return 1;
+	}
+	else
+	{
+		return 0;
+	}
+}
+#endif
 
 void mac_timer_stop()
 {
+	mac_timer_active=0;
 	timer_mac_stop();
 	mac_timer_event = MAC_TIMER_NONE;
 }
-
+/**
+ * MAC timer Callback.
+ *
+ *  CB send MAC timer event to MAC
+ */
 void mac_timer_callback(void)
 {
-	portBASE_TYPE prev_task = pdFALSE;
-	prev_task = xQueueSendFromISR(mac_events, &mac_timer_event, prev_task);		
-	timer_mac_stop();
+	if(mac_timer_active)
+	{
+		portBASE_TYPE prev_task = pdFALSE;
+		mac_timer_active=0;
+		prev_task = xQueueSendFromISR(mac_events, &mac_timer_event, prev_task);
+	}
 }
 
 /**
@@ -1209,4 +1656,3 @@ void rf_802_15_4_ip_layer_address_mode_set(uint8_t support_short_addr)
 	else
 		ip_address_setup( 0,NULL); 
 }
-

@@ -71,6 +71,7 @@ typedef enum handle_t
 	HANDLE_ASSOC_REQ		= 8,
 	HANDLE_DATA_REQ			= 9,
     HANDLE_DEFAULT	   		= 10,
+	HANDLE_TTL_UPDATE	   	= 11,
 }handle_t;
 
 /** buffer direction. */
@@ -103,7 +104,7 @@ typedef struct
   buffer_direction_t dir;                     /*!< Up or down */
   uint16_t           buf_ptr;                /*!< Current pointer in the buffer */
   uint16_t           buf_end;                /*!< End pointer in the buffer */
-  uint16_t	     size;						/*!< Buffer size */
+  uint16_t	     	 size;						/*!< Buffer size */
   buffer_options_t   options;                /*!< Additional signal info etc */
   uint8_t            buf[2];       			/*!< Buffer pointer */
 } buffer_t;

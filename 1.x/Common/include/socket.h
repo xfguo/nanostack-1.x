@@ -54,6 +54,7 @@
 #define NPING_PORT			254
 #define	UDP_ECHO_PORT		7
 #define REMOVE_ROUTE		2
+#define ROUTE_ERR			3
 #define REMOVE_NEIGHBOUR	2
 #define UPDATE_NEIGHBOUR	0
 #define ADD_CHILD			1
@@ -73,11 +74,9 @@ typedef struct
   sock_handler_func callback;   /*!< Socket handling callback function */
 } socket_t;
 
-#ifdef CELLSENSOR
-extern portCHAR init_stack_bus( stack_event_t stack_event, sock_handler_func stack_event_handler);
-#else
-extern portCHAR stack_service_init( stack_event_t stack_event, sock_handler_func stack_event_handler, uint8_t gateway_discover , gateway_cache_t *gw_table );
-#endif
+
+//extern portCHAR stack_service_init( stack_event_t stack_event, sock_handler_func stack_event_handler, uint8_t gateway_discover , gateway_cache_t *gw_table );
+extern  stack_event_t stack_service_init( sock_handler_func stack_event_handler );
 extern void socket_init (void);
 
 extern socket_t *socket(module_id_t protocol,

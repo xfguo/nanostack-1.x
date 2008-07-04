@@ -61,16 +61,21 @@ extern volatile tskTCB * volatile pxCurrentTCB;
 #include "uart.h"
 
 #define UART_TX_NO_QUEUE
-
+#define UART_RING_BUFFER
 #ifdef HAVE_UART0
 
 #ifndef UART0_RX_LEN
-#define UART0_RX_LEN 4
+#define UART0_RX_LEN 64
 #endif
 
 #ifndef UART0_TX_LEN
 #define UART0_TX_LEN 128
 #endif
+uint8_t uart_rx_buffer[UART0_RX_LEN];
+volatile uint8_t uart_rx_rd = 0;
+volatile uint8_t uart_rx_wr = 0;
+
+
 volatile portCHAR uart0_txempty = pdTRUE;
 
 /** The queue used to hold received characters. */
@@ -87,13 +92,23 @@ uint8_t uart0_tx_wr = 0;
 #ifdef HAVE_POWERSAVE
 xPowerHandle uart0_ph = 0;
 #endif
-
+/**
+ * Init UART 0.
+ *
+ *  Supported UART speed are: 9600/ 38400 / 115200.
+ * \param speed 9600/38400/115200
+ *
+ */
 void uart0_init(uint32_t speed)
 {
-	if (speed != 115200) return;
+	//if (speed != 115200 && speed != 9600) return;
+
+	//if ((speed != 115200 && speed != 9600 ) && speed != 38400) return;
 	if (uart0_rx == 0)
 	{
+#ifndef UART_RING_BUFFER
 		uart0_rx = xQueueCreate(UART0_RX_LEN, ( unsigned portBASE_TYPE ) sizeof( signed portCHAR ) );
+#endif
 #ifndef UART_TX_NO_QUEUE
 		uart0_tx = xQueueCreate(UART0_TX_LEN, ( unsigned portBASE_TYPE ) sizeof( signed portCHAR ) );
 #else
@@ -124,8 +139,23 @@ void uart0_init(uint32_t speed)
 	P0DIR &= ~0x14;		/*CTS & RX in*/
 #endif
 	
-	U0BAUD=216;		/*115200*/
-	U0GCR =/* U_ORDER |*/ 11; /*LSB first and 115200*/
+	//U0BAUD=216;		/*115200*/
+	//U0GCR =/* U_ORDER |*/ 11; /*LSB first and 115200*/
+	if (speed == 115200) {
+		U0BAUD=216;		/*115200*/
+		U0GCR =/* U_ORDER |*/ 11; /*LSB first and 115200*/
+	}
+
+	if (speed == 38400) {
+		U0BAUD=59;		/*38400*/
+		U0GCR =/* U_ORDER |*/ 10; /*LSB first and 38400*/
+	}
+
+	if (speed == 9600) {
+		U0BAUD= 59;
+		U0GCR = 8; /*LSB first and 9600*/
+	}
+
 
 /*	U0BAUD= 59;
 	U0GCR = 8;*/ /*LSB first and 9600*/
@@ -133,7 +163,14 @@ void uart0_init(uint32_t speed)
 #ifdef UART0_RTSCTS
 	U0UCR = 0x42;	/*defaults: 8N1, RTS/CTS, high stop bit*/
 #else
-	U0UCR = 0x02;	/*defaults: 8N1, no flow control, high stop bit*/
+	//if (speed == 38400) {
+		//U0UCR = 0x2a;	/*defaults: 8N1, no flow control, high stop bit*/
+	//}
+	//else
+	//{
+
+		U0UCR = 0x02;	/*defaults: 8N1, no flow control, high stop bit*/
+	//}
 #endif
 	U0CSR = U_MODE | U_RE |U_TXB; /*UART mode, receiver enable, TX done*/
 	IEN0_URX0IE = 1;
@@ -141,10 +178,50 @@ void uart0_init(uint32_t speed)
 
 	uart0_txempty = pdTRUE;
 }
-
+/**
+ * Poll UART 0 blockking RX read.
+ *
+ * \param time waiting time in the OS tick.
+ * \return data or -1 when no data
+ * 
+ */
 int16_t uart0_get_blocking(portTickType time)
 {
-	uint8_t byte;
+	int16_t byte = -1;
+#ifdef UART_RING_BUFFER
+//int16_t byte = -1;
+	uint8_t time_left = time / portTICK_RATE_MS;
+	
+	time_left >>= 2;
+	if (!time_left) time_left = 1;
+	
+	while (byte == -1)
+	{
+
+		if (uart_rx_rd != uart_rx_wr)
+		{
+			uint16_t tmp = uart_rx_rd;
+			
+			byte = uart_rx_buffer[tmp++];
+			if (tmp == UART0_RX_LEN) tmp = 0;
+			uart_rx_rd= tmp;			
+			
+			byte &= 0xFF;
+		}
+		else if (time_left)
+		{
+			vTaskDelay(( portTickType ) 4);
+			time_left --;
+		}
+		else
+		{	/*timeout*/
+			return -1;
+		}
+	}
+	return 0 + (uint16_t) byte;
+
+#else
+
 
 	if ( xQueueReceive(uart0_rx, &byte, time ) == pdTRUE)
 	{
@@ -154,12 +231,32 @@ int16_t uart0_get_blocking(portTickType time)
 	{
 		return -1;
 	}
+#endif
 }
-
+/**
+ * Poll UART 0 RX read.
+ *
+ * \return data or -1 when no data
+ * 
+ */
 int16_t uart0_get(void)
 {
 	uint8_t byte;
-	
+#ifdef UART_RING_BUFFER
+	if (uart_rx_rd != uart_rx_wr)
+	{
+		uint16_t tmp = uart_rx_rd;	
+		byte = uart_rx_buffer[tmp++];
+		if (tmp == UART0_RX_LEN) tmp = 0;
+		uart_rx_rd= tmp;			
+		//byte &= 0xFF;
+		return byte;
+	}
+	return -1;	
+
+#else
+
+
 	if ( xQueueReceive(uart0_rx, &byte, (portTickType) 0 ) == pdTRUE)
 	{
 		return 0 + (uint16_t) byte;
@@ -168,12 +265,19 @@ int16_t uart0_get(void)
 	{
 		return -1;
 	}
+#endif
 }
-
+/**
+ * Send data to UART 0.
+ *
+ * \param byte data for send
+ * \return data  or -1 when no data
+ * 
+ */
 int8_t uart0_put(uint8_t byte)
 {
 	int8_t retval = 0;
-	
+	IEN0_EA = 0;
 	if (uart0_txempty == pdTRUE)
 	{
 		uart0_txempty = pdFALSE;
@@ -203,7 +307,7 @@ int8_t uart0_put(uint8_t byte)
 		else
 		{
 			uart0_tx_buffer[new_ptr] = byte;
-			IEN0_EA = 0;
+			//IEN0_EA = 0;
 			uart0_tx_wr = new_ptr;
 			if (uart0_txempty == pdTRUE)
 			{
@@ -212,11 +316,11 @@ int8_t uart0_put(uint8_t byte)
 				uart0_txempty = pdFALSE;
 				U0BUF = byte;
 			}
-			IEN0_EA = 1;
+			//IEN0_EA = 1;
 		}
 #endif
 	}
-
+	IEN0_EA = 1;
 	return retval;
 }
 
@@ -228,24 +332,66 @@ int8_t uart0_put(uint8_t byte)
 
 void uart0_rxISR( void ) interrupt (URX0_VECTOR)
 {
-	uint8_t byte;
-	
+	//uint8_t byte;
+	IEN0_EA = 0;
 	TCON_URX0IF = 0;
 
 	/* Get the character from the UART and post it on the queue of Rxed 
 	characters. */
-	byte = U0BUF;
+	//byte = U0BUF;
+#ifdef UART_RING_BUFFER
+	uart_rx_buffer[uart_rx_wr++] = U0BUF;
+	if(uart_rx_wr == UART0_RX_LEN)
+		uart_rx_wr=0;
 
-	if( xQueueSendFromISR(uart0_rx, &byte, pdFALSE ) == pdTRUE )
+#else
+	xQueueSendFromISR(uart0_rx, &byte, pdFALSE ); 
+	/*if( xQueueSendFromISR(uart0_rx, &byte, pdFALSE ) == pdTRUE )
 	{
-		taskYIELD();
-	}
+		//taskYIELD();
+	}*/
+#endif
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	IEN0_EA = 1;
 }
 
+#ifdef IR_READER_UART
+void ir_uart_rx_check(void)
+{
+	if (U0CSR & U_RXB)
+	{
+#ifdef UART_RING_BUFFER
+	uart_rx_buffer[uart_rx_wr++] = U0BUF;
+	if(uart_rx_wr == UART0_RX_LEN)
+		uart_rx_wr=0;
 
+#else
+
+
+		uint8_t byte;
+		
+		//if ((U0CSR & (U_FE | U_ERR)) == 0)
+		//{
+			byte = U0BUF;
+
+			if( xQueueSendFromISR(uart0_rx, &byte, pdFALSE ) == pdTRUE )
+			{
+				//taskYIELD();
+			}
+		/*}
+		else
+		{
+			uint8_t dummy = U0BUF;
+			U0CSR &= ~(U_FE | U_ERR);
+		}*/
+#endif
+		TCON_URX0IF = 0;
+	}
+}
+
+#endif
 /**
  * UART Tx interrupt service routine.
  * for UART 0
@@ -255,7 +401,7 @@ void uart0_txISR( void ) interrupt (UTX0_VECTOR)
 #ifndef UART_TX_NO_QUEUE
 	uint8_t byte;
 	portBASE_TYPE task = pdFALSE;
-
+	IEN0_EA = 0;
 	IRCON2_UTX0IF = 0;
 
 	if( xQueueReceiveFromISR( uart0_tx, &byte, &task ) == pdTRUE )
@@ -278,13 +424,14 @@ void uart0_txISR( void ) interrupt (UTX0_VECTOR)
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	IEN0_EA = 1;
 }
 #endif
 
 #ifdef HAVE_UART1
 
 #ifndef UART1_RX_LEN
-#define UART1_RX_LEN 4
+#define UART1_RX_LEN 64
 #endif
 
 #ifndef UART1_TX_LEN
@@ -308,10 +455,16 @@ uint8_t uart1_tx_wr = 0;
 #ifdef HAVE_POWERSAVE
 xPowerHandle uart1_ph = 0;
 #endif
-
+/**
+ * Init UART 1.
+ *
+ *  Supported UART speed are: 9600/ 38400 / 115200.
+ * \param speed 9600/38400/115200
+ *
+ */
 void uart1_init(uint32_t speed)
 {
-	if (speed != 115200) return;
+	//if (speed != 115200 ) return;
 	if (uart1_rx == 0)
 	{
 		uart1_rx = xQueueCreate(UART1_RX_LEN, ( unsigned portBASE_TYPE ) sizeof( signed portCHAR ) );
@@ -344,10 +497,26 @@ void uart1_init(uint32_t speed)
 	P1DIR &= ~0x90;		/*CTS, RX in*/
 #endif
 
+	if (speed == 115200) {
+		U1BAUD=216;		/*115200*/
+		U1GCR =/* U_ORDER |*/ 11; /*LSB first and 115200*/
+	}
+
+	if (speed == 38400) {
+		U1BAUD=59;		/*38400*/
+		U1GCR =/* U_ORDER |*/ 10; /*LSB first and 38400*/
+	}
+
+	if (speed == 9600) {
+		U1BAUD= 59;
+		U1GCR = 8; /*LSB first and 9600*/
+	}
+
+
 	/*Baud rate = ((256+UxBAUD) * 2^UxGCR)*crystal / (2^28)*/
-	U1BAUD=216;		/*115200*/
-	U1GCR = /*U_ORDER |*/ 11; /*LSB first and 115200*/
-	
+	//U1BAUD=216;		/*115200*/
+	//U1GCR = /*U_ORDER |*/ 11; /*LSB first and 115200*/
+
 #ifdef UART1_RTSCTS
 	U1UCR = 0x42;	/*defaults: 8N1, RTS/CTS, high stop bit*/
 #else
@@ -360,7 +529,13 @@ void uart1_init(uint32_t speed)
 
 	uart1_txempty = pdTRUE;
 }
-
+/**
+ * Poll UART 1 blockking RX read.
+ *
+ * \param time waiting time in the OS tick.
+ * \return data or -1 when no data
+ * 
+ */
 int16_t uart1_get_blocking(portTickType time)
 {
 	uint8_t byte;
@@ -374,7 +549,12 @@ int16_t uart1_get_blocking(portTickType time)
 		return -1;
 	}
 }
-
+/**
+ * Poll UART 1 RX read data.
+ *
+ * \return data  or -1 when no data
+ * 
+ */
 int16_t uart1_get(void)
 {
 	uint8_t byte;
@@ -388,11 +568,17 @@ int16_t uart1_get(void)
 		return -1;
 	}
 }
-
+/**
+ * Send data to UART 1.
+ *
+ * \param byte data for send
+ * \return data  or -1 when no data
+ * 
+ */
 int8_t uart1_put(uint8_t byte)
 {
 	int8_t retval = 0;
-	
+	IEN0_EA = 0;
 	if (uart1_txempty == pdTRUE)
 	{
 		uart1_txempty = pdFALSE;
@@ -422,7 +608,7 @@ int8_t uart1_put(uint8_t byte)
 		else
 		{
 			uart1_tx_buffer[new_ptr] = byte;
-			IEN0_EA = 0;
+			//IEN0_EA = 0;
 			uart1_tx_wr = new_ptr;
 			if (uart1_txempty == pdTRUE)
 			{
@@ -431,11 +617,11 @@ int8_t uart1_put(uint8_t byte)
 				uart1_txempty = pdFALSE;
 				U1BUF = byte;
 			}
-			IEN0_EA = 1;
+			
 		}
 #endif
 	}
-
+	IEN0_EA = 1;
 	return retval;
 }
 
@@ -448,7 +634,7 @@ int8_t uart1_put(uint8_t byte)
 void uart1_rxISR( void ) interrupt (URX1_VECTOR)
 {
 	uint8_t byte;
-	
+	IEN0_EA = 0;
 	TCON_URX1IF = 0;
 
 	/* Get the character from the UART and post it on the queue of Rxed 
@@ -457,11 +643,12 @@ void uart1_rxISR( void ) interrupt (URX1_VECTOR)
 
 	if( xQueueSendFromISR(uart1_rx, &byte, pdFALSE ) == pdTRUE)
 	{
-		taskYIELD();
+		//taskYIELD();
 	}
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	IEN0_EA = 1;
 }
 
 
@@ -474,7 +661,7 @@ void uart1_txISR( void ) interrupt (UTX1_VECTOR)
 #ifndef UART_TX_NO_QUEUE
 	uint8_t byte;
 	portBASE_TYPE task = pdFALSE;
-
+IEN0_EA = 0;
 	IRCON2_UTX1IF = 0;
 	if( xQueueReceiveFromISR( uart1_tx, &byte, &task ) == pdTRUE )
 	{
@@ -496,6 +683,7 @@ void uart1_txISR( void ) interrupt (UTX1_VECTOR)
 #ifdef HAVE_POWERSAVE
 	power_interrupt_epilogue();
 #endif
+	IEN0_EA = 1;
 }
 
 #endif

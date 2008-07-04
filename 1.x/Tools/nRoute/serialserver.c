@@ -109,6 +109,7 @@ int conf_state = 0;
 
 #define MAX_SERIAL_READ 512
 
+
 /** The serial server.
  *
  *	This function implements the serial port server which listens to data arriving from radio module.
@@ -124,6 +125,7 @@ void serial_server(void)
 	unsigned int tag_info = 0;
 	unsigned int last = 0;
 	unsigned int header = 0;
+	unsigned int gw_adv_period = nRdconf.gw_adv_period;
 	
 #ifdef __APPLE__
 	fd_set fds;
@@ -134,7 +136,7 @@ void serial_server(void)
 	unsigned int nfds = 1;
 	int timeout = 100;
 	int rval = 0;
-		
+	unsigned int adv_count = 0;		
 	unsigned char NRP_data_hdr[4] = { 0x4e, 0x52, 0x50, 0x00 };
 	unsigned char NRP_config_query_hdr[4] = { 0x4e, 0x52, 0x50, 0x01 };
 	unsigned char NRP_config_hdr[4] = { 0x4e, 0x52, 0x50, 0x02 };
@@ -273,7 +275,7 @@ void serial_server(void)
 					
 					usleep(100000);
 					
-					port_write(register_nrp, 11);
+					port_write(register_nrp, 7);
 				}
 				if (conf_state > 38)
 				{
@@ -284,6 +286,39 @@ void serial_server(void)
 					}
 					conf_state = 40;
 				}
+			}
+			else if (conf_state < 50)
+			{
+				if ((conf_state++ & 3) == 0)
+				{
+					/* Set channel. */
+					register_nrp[4] = 0x90;
+					register_nrp[5] = 0x00;
+					register_nrp[6] = 0x01;
+					register_nrp[7] = nRdconf.channel;
+
+					if (monitor_mode)
+					{
+						printf("Set channel.\n");
+					}
+					
+					usleep(100000);
+					
+					port_write(register_nrp, 8);
+				}
+				if (conf_state > 48)
+				{
+					logger(0,"Channel select failed.\n");
+					if (monitor_mode)
+					{
+						printf("Channel select failed.\n");
+					}
+					conf_state = 50;
+				}
+			}
+			else
+			{
+				adv_count += timeout;
 			}
 		}
 		else if(fds.revents == POLLIN || fds.revents == POLLPRI)
@@ -388,6 +423,7 @@ void serial_server(void)
 							}
 						}
 					}
+					adv_count += 100;
 #ifndef __APPLE__
 					break;
 				case POLLPRI:
@@ -408,6 +444,21 @@ void serial_server(void)
 
 			}
 #endif /* !APPLE */
+		}
+		if (gw_adv_period && (adv_count > gw_adv_period))
+		{
+			unsigned char router_adv[] = { 0x4E, 0x52, 0x50, 0x00, 0x01, 0x00, 0x01, 0x04, 
+					                           0x05, 0x00, 0x02, 0x86, 0x00, 0x03, 0x00, 0x03, 
+					                           0x03, 0xFF, 0xFF, 0x80, 0x00, 0x0e, 0x00, 0x00, 
+					                           0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+					                           0x00, 0x00, 0x00, 0x00 };
+			adv_count = 0;
+			logger(1, "Send GW advertisement\n");
+			if (monitor_mode)
+			{
+				printf("Send GW advertisement.\n");
+			}
+			port_write(router_adv, sizeof(router_adv));
 		}
 	}
 	pthread_exit(NULL);
@@ -667,6 +718,35 @@ int nrp_from_serial(unsigned char packet[MAX_NRP_PACKET_SIZE], int len)
 					}
 					idx += 5;
 					break;
+				
+				case 0x08:
+					{
+						int tag_len;
+						logger(2, "Found hop count tag (0x08).\n");
+						idx++;
+						tag_len = packet[idx] * 256 + packet[idx+1];					
+						idx += 2;
+						logger(2, "Skipping %d bytes, hop count %d.\n", tag_len, packet[idx]);
+						if (monitor_mode)
+						{
+							printf("Hop count: %d.\n", packet[idx]);
+						}
+						idx += tag_len;
+					}
+					break;
+					
+				default:
+					{
+						int tag_len;
+						
+						logger(2, "Found unknown tag (0x%2.2X).\n", (packet[idx] & 0x7f));
+						idx++;
+						tag_len = packet[idx] * 256 + packet[idx+1];
+						idx += 2;
+						idx += tag_len;
+						logger(2, "Skipping %d bytes.\n", tag_len);
+					}					
+						
 			}
 			if (end) break;
 		}
@@ -710,6 +790,14 @@ int nrp_from_serial(unsigned char packet[MAX_NRP_PACKET_SIZE], int len)
 			if (monitor_mode)
 			{
 				printf("Module MAC received.\n");
+			}
+		}
+		if ((packet[4] & 0x7F) == 0x10)
+		{
+			if ((conf_state >= 40) && (conf_state < 50)) conf_state = 50;
+			if (monitor_mode)
+			{
+				printf("Channel config: %d.\n", packet[7]);
 			}
 		}
 	}
@@ -780,7 +868,13 @@ int nrp_from_serial(unsigned char packet[MAX_NRP_PACKET_SIZE], int len)
 						write(sockfd, data, field_len);
 				}
 			}
-		}	
+		}
+		else if(nRd_conn_table[i].active == 9)
+		{	/*proxy raw packets*/
+			logger(2, "Proxy: Trying to send the packet to remote host.\n");
+			sockfd = nRd_conn_table[i].fd;
+			write(sockfd, packet, len);
+		}
 	}
 
 	logger(2, "Returning to serial_server()\n");

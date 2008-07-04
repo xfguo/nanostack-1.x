@@ -448,6 +448,12 @@ void *process_tcp_connection(void *fd)
 				}
 			}
 		}
+		else if(((readbuf[3]) >> 4) == NRP_VERSION && ((readbuf[3]) & 0xf) == 0x0f)
+		{
+			logger(2, "Packet seems to be in nRP proxy mode\n");
+			/* The packet has Type ID 0 so we activate the connection in proxy mode. */
+			nRd_conn_table[conn_index].active = 9;
+		}
 	}
 	else if(rval == 0)
 	{
@@ -464,6 +470,11 @@ void *process_tcp_connection(void *fd)
 	
 	
 	if(nRd_conn_table[conn_index].active == 1)
+	{
+		logger(2, "Got enough information from the remote host to activate the connection, sending OK.\n");
+		write(connfd, conf_reply_ok, 9);
+	}
+	else if(nRd_conn_table[conn_index].active == 9)
 	{
 		logger(2, "Got enough information from the remote host to activate the connection, sending OK.\n");
 		write(connfd, conf_reply_ok, 9);

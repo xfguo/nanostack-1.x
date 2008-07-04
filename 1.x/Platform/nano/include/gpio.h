@@ -83,7 +83,7 @@
 #define LED2() P0_5
 
 #define N710_BUTTON_INIT() { P0DIR &= ~0xc0; }
-#define N710_SENSOR_INIT() { P0DIR &= ~0x0c; }
+#define N710_SENSOR_INIT() { P0DIR &= ~0x0c;  P0INP |= 0x0c;}
 
 #define N710_BUTTON_1 P0_6
 #define N710_BUTTON_2 P0_7
@@ -106,7 +106,7 @@
 #define LED2() P0_5
 
 #define N710_BUTTON_INIT() { P0DIR &= ~0xc0; }
-#define N710_SENSOR_INIT() { P0DIR &= ~0x0c; }
+#define N710_SENSOR_INIT() { P0DIR &= ~0x0c; P0INP |= 0x03; }
 
 #define N710_BUTTON_1 P0_6
 #define N710_BUTTON_2 P0_7

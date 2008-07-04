@@ -62,7 +62,7 @@ int main( void )
 
 	LED1_ON();
 	LED2_ON();
-
+	stack_init();
 	xTaskCreate( vMain, "Main", configMAXIMUM_STACK_SIZE, NULL, ( tskIDLE_PRIORITY + 0 ), ( xTaskHandle * )NULL );	
 
 	vTaskStartScheduler();
@@ -70,14 +70,14 @@ int main( void )
 	return 0;
 }
 
+extern portCHAR nrp_gw_advertisement(void);	/*from protocol_lib.c*/
+extern uint8_t nrp_router_advertise_period;	/*in nrp.c*/
+
 static void vMain(int8_t *pvParameters )
 {
-	int16_t byte;
-	uint8_t i;
+	pvParameters;
 	
 	debug_init(115200);
-
-	stack_init();
 	debug("n600\r\n");
 
 	LED2_OFF();
@@ -85,42 +85,16 @@ static void vMain(int8_t *pvParameters )
 	
 	for( ;; )
 	{
-		byte = debug_read_blocking(5000/portTICK_RATE_MS);
-
-		if (byte != -1)
+		while (nrp_router_advertise_period == 0)
 		{
-	 		switch(byte)
-			{
-				case '\r':
-					debug("\r\n");
-					break;
-
-				case 'E':
-					for (i=0; i<9; i++)
-					{
-						nrp_uart_put('0'+i);						
-					}
-					debug("E");
-					break;
-				case 'e':
-					nrp_uart_put('5');
-					debug("e");
-					break;
-				case 'm':
-					{
-						sockaddr_t mac;
-						
-						rf_mac_get(&mac);
-						
-						debug("MAC: ");
-						debug_address(&mac);
-						debug("\r\n");
-					}
-					break;
-
-				default:
-					debug_put(byte);
-			}	
+			vTaskDelay(10000/portTICK_RATE_MS);
+		}
+		while (nrp_router_advertise_period)
+		{
+			uint16_t time = (nrp_router_advertise_period*1000); 
+			vTaskDelay(time/portTICK_RATE_MS);
+			
+			nrp_gw_advertisement();
 		}
 	}
 }

@@ -15,7 +15,9 @@ $(SOURCE_DIR)/list.c \
 $(PORT_DIR)/port.c
 
 SRC += $(SOURCE_DIR)/portable/MemMang/heap_2.c
-CFLAGS += -DHAVE_DYNAMIC_BUFFERS
+#CFLAGS += -DHAVE_DYNAMIC_BUFFERS
+CFLAGS += -DMANUAL_DMA_TRIG
+CFLAGS += -DSTACK_RING_BUFFER_MODE
 
 #Platform driver section
 SRC	+= \
@@ -81,8 +83,13 @@ CFLAGS += -DHAVE_RF_LED=$(HAVE_RF_LED)
 endif
 endif
 
+ifeq ($(HAVE_RF_DMA),1)
 CFLAGS += -DHAVE_RF_DMA
 SRC += $(PLATFORM_DIR)/rf_dma.c 
+else
+SRC += $(PLATFORM_DIR)/rf.c 
+endif
+
 
 #Nanostack internal section
 
@@ -92,13 +99,13 @@ else
 CFLAGS += -DSTACK_BUFFERS_MAX=$(STACK_BUFFERS_MAX)
 endif
 ifeq ($(STACK_BUFFERS_MIN),)
-CFLAGS += -DSTACK_BUFFERS_MIN=4
+CFLAGS += -DSTACK_BUFFERS_MIN=6
 else
 CFLAGS += -DSTACK_BUFFERS_MIN=$(STACK_BUFFERS_MIN)
 endif
 
 ifeq ($(DEBUG_RX_LEN),)
-CFLAGS += -DDEBUG_RX_LEN=8
+CFLAGS += -DDEBUG_RX_LEN=24
 else
 CFLAGS += -DDEBUG_RX_LEN=$(DEBUG_RX_LEN)
 endif
@@ -177,23 +184,6 @@ endif
 CFLAGS += -DNWK_CAP_DEFAULTS="$(NWK_CAP)"
 endif
 
-ifeq ($(SUPERFRAME_MODE),1)
-	CFLAGS += -DHAVE_PERIOD_TIMER
-	CFLAGS += -DSUPERFRAME_MODE
-
-	ifeq ($(BEACON_ORDER),)
-		CFLAGS += -DBEACON_ORDER=7
-	else
-		CFLAGS += -DBEACON_ORDER=$(BEACON_ORDER)
-	endif
-	
-	ifeq ($(SUPERFRAME_ORDER),)
-		CFLAGS += -DSUPERFRAME_ORDER=7
-	else
-		CFLAGS += -DSUPERFRAME_ORDER=$(SUPERFRAME_ORDER)
-	endif
-endif
-
 
 #Neighbour & Routing table
 ifeq ($(NEIGHBOR_MAX),)
@@ -202,22 +192,10 @@ else
 CFLAGS += -DNEIGHBOR_MAX=$(NEIGHBOR_MAX)
 endif
 
-ifeq ($(NEIGHBOR_MIN),)
-CFLAGS += -DNEIGHBOR_MIN=15
-else
-CFLAGS += -DNEIGHBOR_MIN=$(NEIGHBOR_MIN)
-endif
-
 ifeq ($(ROUTE_MAX),)
 CFLAGS += -DROUTE_MAX=20
 else
 CFLAGS += -DROUTE_MAX=$(ROUTE_MAX)
-endif
-
-ifeq ($(ROUTE_MIN),)
-CFLAGS += -DROUTE_MIN=15
-else
-CFLAGS += -DROUTE_MIN=$(ROUTE_MIN)
 endif
 
 #Extra options for Coordinator and Gateway
@@ -238,14 +216,13 @@ else
 CFLAGS += -DPAN_CHANNEL=$(PAN_CHANNEL)
 endif
 
-ifeq ($(NWK_MAX_CHILD),)
-CFLAGS += -DNWK_MAX_CHILD=15
-else
-CFLAGS += -DNWK_MAX_CHILD=$(NWK_MAX_CHILD)
-endif
-
-ifeq ($(NO_FCS),1)
+#ifeq ($(NO_FCS),1)
 CFLAGS += -DNO_FCS
+#endif
+
+ifeq ($(HAVE_AES),1)
+CFLAGS += -DHAVE_AES
+SRC += $(PLATFORM_DIR)/aes.c 
 endif
 
 #debug section
@@ -253,6 +230,10 @@ endif
 SRC += $(PLATFORM_DIR)/debug.c 
 ifeq ($(HAVE_DEBUG),1)
 CFLAGS += -DHAVE_DEBUG
+
+ifeq ($(DEBUG_UART),)
+DEBUG_UART=1
+endif
 
 ifeq ($(DEBUG_UART),0)
 
@@ -266,13 +247,14 @@ ifeq ($(HAVE_NRP),1)
 #CFLAGS += -DHAVE_UART1
 #CFLAGS += -DNRP_UART=1
 endif
-else
+
+else 
 CFLAGS += -DDEBUG_UART=1
 CFLAGS += -DHAVE_UART1
 ifeq ($(HAVE_NRP),1)
 #CFLAGS += -DHAVE_UART0
 #CFLAGS += -DNRP_UART=0
-endif
+endif 
 endif
 
 SRC += $(PLATFORM_DIR)/uart.c 
@@ -288,32 +270,17 @@ SRC += $(PLATFORM_DIR)/uart.c
 	ifeq ($(B1W_DEBUG),1)
 	CFLAGS += -DB1W_DEBUG
 	endif
-	ifeq ($(NWK_CONFIG_DEBUG),1)
-	CFLAGS += -DNWK_CONFIG_DEBUG
-	endif
 	ifeq ($(CUDP_DEBUG),1)
 	CFLAGS += -DCUDP_DEBUG
 	endif
-	ifeq ($(ROUTING_DEBUG),1)
-	CFLAGS += -DROUTING_DEBUG
-	endif
 	ifeq ($(CIPV6_DEBUG),1)
 	CFLAGS += -DCIPV6_DEBUG
-	endif
-	ifeq ($(CIPV6_CONTROL_DEBUG),1)
-	CFLAGS += -DCIPV6_CONTROL_DEBUG
 	endif
 	ifeq ($(ICMP_DEBUG),1)
 	CFLAGS += -DICMP_DEBUG
 	endif
 	ifeq ($(SOCKET_DEBUG),1)
 	CFLAGS += -DSOCKET_DEBUG
-	endif
-	ifeq ($(RF_802_15_4_DEBUG),1)
-	CFLAGS += -DRF_802_15_4_DEBUG
-	endif
-	ifeq ($(RF_RAW_DEBUG),1)
-	CFLAGS += -DRF_RAW_DEBUG
 	endif
 	ifeq ($(SSI_DEBUG),1)
 	CFLAGS += -DSSI_DEBUG
@@ -323,21 +290,30 @@ SRC += $(PLATFORM_DIR)/uart.c
 	endif
 else
 
+SRC += $(PLATFORM_DIR)/uart.c
+
 ifeq ($(HAVE_NRP),1)
 #SRC += $(PLATFORM_DIR)/uart.c 
 #CFLAGS += -DHAVE_UART1
 #CFLAGS += -DNRP_UART=1
-endif
+endif 
 
-endif
+endif 
 
 #NanoStack section
 SRC	+= \
-$(COMMON_DIR)/event_timer.c \
 $(COMMON_DIR)/module.c \
 $(COMMON_DIR)/socket.c \
 $(COMMON_DIR)/stack.c \
-$(COMMON_DIR)/routing.c
+$(COMMON_DIR)/routing.c\
+$(COMMON_DIR)/protocol_lib.c
+
+SRC += $(COMMON_DIR)/modules/nano_mesh.c
+CFLAGS += -DHAVE_NANOMESH
+ifeq ($(AUTO_GW_RESPONSE),1)
+CFLAGS += -DAUTO_GW_RESPONSE
+endif
+
 
 #Nanostack service section
 ifeq ($(APP_ICMP_ECHO),1)
@@ -353,16 +329,13 @@ endif
 
 ifeq ($(APP_ECHO),1)
 CFLAGS += -DAPP_ECHO
-SRC	+= $(COMMON_DIR)/protocol_lib.c
+#SRC	+= $(COMMON_DIR)/protocol_lib.c
 endif
 
-#Automatic GW tracking, only for FFD or AD-HOC mode devices
-ifeq ($(GW_AUTO_DISCOVER_SERVICE),1)
-CFLAGS += -DGW_AUTO_DISCOVER_SERVICE
-ifeq ($(APP_ECHO),1)
-else
-SRC	+= $(COMMON_DIR)/protocol_lib.c
-endif
+#Automatic GW discover response send for GW device
+ifeq ($(AUTO_GW_RESPONSE),1)
+CFLAGS += -DAUTO_GW_RESPONSE
+
 endif
 
 ifeq ($(HAVE_ROUTING),1)
@@ -372,15 +345,15 @@ endif
 
 ifeq ($(HAVE_NRP),1)
 SRC += nrp_uart.c nrp.c
-CFLAGS += -DHAVE_NRP 
+CFLAGS += -DHAVE_NRP
+MAC_ENERGY_SCAN=1
 else
 endif
 
-ifeq ($(HAVE_NWK_MANAGER),1)
-SRC += $(COMMON_DIR)/modules/nwk_manager.c 
-CFLAGS += -DHAVE_NWK_MANAGER 
-else
+ifeq ($(MAC_ENERGY_SCAN) ,1)
+CFLAGS += -DMAC_ENERGY_SCAN 
 endif
+
 
 ifeq ($(HAVE_ICMP),1)
 SRC += $(COMMON_DIR)/modules/icmp.c 
@@ -393,11 +366,6 @@ SRC += $(COMMON_DIR)/modules/mac_15_4.c
 CFLAGS += -DHAVE_MAC_15_4
 endif
 
-ifeq ($(HAVE_RF_802_15_4),1)
-SRC += $(COMMON_DIR)/modules/rf802_15_4.c
-CFLAGS += -DHAVE_RF_802_15_4
-endif
-
 ifeq ($(HAVE_CIPV6),1)
 SRC += $(COMMON_DIR)/modules/cIPv6.c 
 CFLAGS += -DHAVE_CIPV6
@@ -408,17 +376,18 @@ SRC += $(COMMON_DIR)/modules/cUDP.c
 CFLAGS += -DHAVE_CUDP
 endif
 
-ifeq ($(HAVE_NUDP),1)
-SRC += $(COMMON_DIR)/modules/nudp.c 
-CFLAGS += -DHAVE_NUDP
-endif
-
 ifeq ($(HAVE_SSI),1)
 SRC += $(COMMON_DIR)/modules/ssi.c 
 CFLAGS += -DHAVE_SSI
+HAVE_EVENT_TIMER=1
 endif
 
-
+ifeq ($(HAVE_EVENT_TIMER), 1)
+SRC += $(COMMON_DIR)/event_timer.c 
+CFLAGS += -DconfigUSE_TICK_HOOK=1
+else
+CFLAGS += -DconfigUSE_TICK_HOOK=0
+endif
 
 MODEL=large
 PARM_MODEL=--stack-auto
@@ -464,7 +433,7 @@ ASFLAGS = -plosgff
 SHELL = sh
 
 CC = sdcc
-AS = sdcc-asx8051
+AS = asx8051
 
 .SUFFIXES: .rel
 
@@ -527,7 +496,7 @@ ifeq ($(HAVE_BANKING),1)
 #codeseg.list should have "BANKx yyyyyy.c" (without quotes ) lines
 code_segment = --codeseg $(word 1,$(shell grep "$(notdir $(1))" segment.rules ) CSEG )
 
-segment.rules:
+segment.rules: $(PLATFORM_DIR)/segment.rules
 	cp $(PLATFORM_DIR)/segment.rules segment.rules
 
 bankproxy_template.asm: $(PLATFORM_DIR)/bankproxy_template.asm

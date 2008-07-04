@@ -49,6 +49,8 @@
 #include "control_message.h"
 #include "neighbor_routing_table.h"
 #include "cipv6.h"
+#include "gpio.h"
+
 
 /*
 [NAME]
@@ -66,8 +68,10 @@ MODULE_ICMP,
 extern portCHAR icmp_init(buffer_t *buf);
 extern portCHAR icmp_handle( buffer_t *buf );
 extern portCHAR icmp_check( buffer_t *buf );
-uint8_t gateway_features;
 
+uint8_t gateway_features;
+ipv6_address_t ipv6_address_tmp;
+extern namomesh_info_t namomesh_info;
 
 /**
  *  Initialize ICMP module.
@@ -119,7 +123,7 @@ portCHAR icmp_handle( buffer_t *buf )
 #ifdef HAVE_ROUTING
 	uint8_t i=0;
 #endif	
-	//debug("ICMP: handler.\r\n");
+	debug("ICMP: handler.\r\n");
 
 	if(buf->options.type == BUFFER_CONTROL && buf)		/* Control message received */
 	{	/* Control-message */
@@ -184,7 +188,7 @@ portCHAR icmp_handle( buffer_t *buf )
 				break;
 	
 			case BUFFER_UP:
-
+				debug("IC:UP\r\n");
 				dptr = (buf->buf + buf->buf_ptr) +2;
 				icmp_temp_16 = *dptr++;
 				icmp_temp_16 += ((uint16_t) (*dptr++) << 8);
@@ -200,11 +204,39 @@ portCHAR icmp_handle( buffer_t *buf )
 #endif
 #ifdef HAVE_NRP
 				{
-					buf->from = MODULE_ICMP;
-					buf->to = MODULE_NRP;
-					stack_buffer_push(buf);
-						
-					return pdTRUE;
+					dptr = (buf->buf + buf->buf_ptr);	
+					icmp_type = *dptr++;
+					icmp_code = *dptr++;
+#ifdef AUTO_GW_RESPONSE
+					if(buf && icmp_type==ROUTER_SOLICICATION_TYPE)
+					{
+					
+						buf->dst_sa.addr_type = buf->src_sa.addr_type;
+						buf->src_sa.addr_type = ADDR_NONE;
+						memcpy(buf->dst_sa.address, buf->src_sa.address, 8);
+						memset(buf->buf, 0, 16);
+						buf->buf_ptr = 0;
+						buf->buf_end = 16;
+						dptr = buf->buf + buf->buf_ptr;
+
+						*dptr++ = ROUTER_ADVRT_TYPE;
+						*dptr++ = ICMP_CODE;
+						*dptr++ = 0x00;
+						*dptr++ = 0x00;
+						*dptr++ = GENERAL_HOPLIMIT;
+						add_fcf(buf);
+						stack_buffer_push(buf);
+						return pdTRUE;						
+					}
+					else
+#endif
+					{
+
+						buf->from = MODULE_ICMP;
+						buf->to = MODULE_NRP;
+						stack_buffer_push(buf);	
+						return pdTRUE;
+					}
 				}
 #else
 				{
@@ -251,30 +283,36 @@ portCHAR icmp_handle( buffer_t *buf )
 				}
 				else if(buf && icmp_type==ROUTER_ADVRT_TYPE)
 				{
-					gw_table_update(buf);
+					//taskENTER_CRITICAL();
+					//gw_table_update(buf);
+					//taskEXIT_CRITICAL();
+					buf->buf_end = 0;
+					buf->buf_ptr = 0;
+					ptr = ( control_message_t*) buf->buf;
+					ptr->message.ip_control.message_id = ROUTER_DISCOVER_RESPONSE;
+					push_to_app(buf);
 					buf=0;
 				}
 #ifdef HAVE_ROUTING
-				
+
 
 				else if(buf && icmp_type == ICMP_ERROR_MESSAGE_TYPE)
 				{
 					if(icmp_code == ERROR_CODE_BROKEN_LINK || icmp_code == ERROR_CODE_NO_ROUTE)
 					{
-						ipv6_address_t ipv6_address;
 						dptr += 6;
 						for(i=0; i<16; i++)
 						{
-							ipv6_address[i] = *dptr++;
+							ipv6_address_tmp[i] = *dptr++;
 						}
-						if(ipv6_address[0] == 0xfe && ipv6_address[1] == 0x80)
+						if(ipv6_address_tmp[0] == 0xfe && ipv6_address_tmp[1] == 0x80)
 						{
-							if((ipv6_address[12]== 0xfe && ipv6_address[11] == 0xff) && ipv6_address[13] == 0x00)
+							if((ipv6_address_tmp[12]== 0xfe && ipv6_address_tmp[11] == 0xff) && ipv6_address_tmp[13] == 0x00)
 							{
 								buf->dst_sa.addr_type=ADDR_802_15_4_PAN_SHORT;
 								for(i=0; i<2; i++)
 								{
-									buf->dst_sa.address[i] = ipv6_address[14+i];
+									buf->dst_sa.address[i] = ipv6_address_tmp[14+i];
 								}
 							}
 							else
@@ -282,16 +320,20 @@ portCHAR icmp_handle( buffer_t *buf )
 								buf->dst_sa.addr_type=ADDR_802_15_4_PAN_LONG;
 								for(i=0; i<8; i++)
 								{
-									buf->dst_sa.address[7-i] = ipv6_address[8+i];
+									buf->dst_sa.address[7-i] = ipv6_address_tmp[8+i];
 								}
 							}
 						}
-
-						update_routing_table(buf->dst_sa.addr_type, buf->dst_sa.address, ADDR_NONE, NULL, 0, 0 , REMOVE_ROUTE);
+						memcpy(&(namomesh_info.adr),&(buf->dst_sa), sizeof(sockaddr_t) );
+						namomesh_info.lqi = 0;
+						namomesh_info.event = ROUTE_ERR;
+						update_routing_table(&namomesh_info);
+						
 						ptr = ( control_message_t*) buf->buf;
 						ptr->message.ip_control.message_id = BROKEN_LINK;
 						push_to_app(buf);
-						buf = 0;
+						//buf = 0;
+						return pdTRUE;
 					}
 					if(buf)
 					{
@@ -300,7 +342,7 @@ portCHAR icmp_handle( buffer_t *buf )
 						return pdTRUE;
 					}
 				}
-
+#endif /*HAVE_ROUTING*/
 				else if(buf && icmp_type==ROUTER_SOLICICATION_TYPE)
 				{
 					if(gateway_features)
@@ -320,13 +362,13 @@ portCHAR icmp_handle( buffer_t *buf )
 						*dptr++ = GENERAL_HOPLIMIT;
 					}
 					else
-					{	
-						stack_buffer_free(buf);
+					{
+						stack_buffer_free(buf);	
 						buf=0;
 						return pdTRUE;
 					}								
 				}
-#endif /*HAVE_ROUTING*/
+
 				else
 				{
 					stack_buffer_free(buf);
@@ -380,7 +422,7 @@ portCHAR icmp_check( buffer_t *buf )
 				break;
 	
 			default:
-				debug("ICMP:not sup\r\n");
+				//debug("ICMP:not sup\r\n");
 				retval = pdFALSE;
 				break;
 		}

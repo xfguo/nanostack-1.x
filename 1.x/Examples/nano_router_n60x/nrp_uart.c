@@ -198,41 +198,30 @@ int16_t nrp_uart_get(void)
 int16_t nrp_uart_get_blocking(uint16_t time)
 {
 	int16_t byte = -1;
-	uint8_t time_left = time / portTICK_RATE_MS;
 	
-	time_left >>= 2;
-	if (!time_left) time_left = 1;
-	
-	while (byte == -1)
-	{
 #ifdef HAVE_DEBUG
-		if (nrp_uart_error != 0)
-		{
-			debug("U!");
-			nrp_uart_error = 0;
-		}
-#endif
-		if (nrp_uart_rx_rd != nrp_uart_rx_wr)
-		{
-			uint16_t tmp = nrp_uart_rx_rd;
-			
-			byte = nrp_uart_rx_buffer[tmp++];
-			if (tmp >= NRP_UART_RX_LEN) tmp = 0;
-			nrp_uart_rx_rd= tmp;			
-			
-			byte &= 0xFF;
-		}
-		else if (time_left)
-		{
-			vTaskDelay(( portTickType ) 4);
-			time_left --;
-		}
-		else
-		{	/*timeout*/
-			return -1;
-		}
+	if (nrp_uart_error != 0)
+	{
+		debug("U!");
+		nrp_uart_error = 0;
 	}
-
+#endif
+	if (nrp_uart_rx_rd != nrp_uart_rx_wr)
+	{
+		uint16_t tmp = nrp_uart_rx_rd;
+		
+		byte = nrp_uart_rx_buffer[tmp++];
+		if (tmp >= NRP_UART_RX_LEN) tmp = 0;
+		nrp_uart_rx_rd= tmp;			
+		
+		byte &= 0xFF;
+	}
+	if (byte == -1)
+	{	/*timeout*/
+		vTaskDelay(( portTickType ) time/portTICK_RATE_MS);
+		return -1;
+	}
+	
 	return byte;
 }
 
@@ -340,6 +329,7 @@ void nrp_uart_rx_dma_callback( void )
 	{	/*get tag and len*/
 		s_ptr-=2;
 		nrp_uart_rx_dma_len = *s_ptr;
+		s_ptr++;
 		nrp_uart_rx_dma_len <<= 8;
 		nrp_uart_rx_dma_len += *s_ptr;
 		if (nrp_uart_rx_dma_len)

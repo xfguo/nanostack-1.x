@@ -327,14 +327,12 @@ typedef struct {
 } ack_waiting_pool_t;
 
 
-/** PAN-descriptor */ /* This structure fill by beacon frame */
 typedef struct {
 	sockaddr_t		src;
 	portTickType	time;
 	int8_t			rssi;
 } disc_res_t;
 
-/** PAN-descriptor */ /* This structure fill by beacon frame */
 typedef struct {
 	disc_res_t	result[PING_RESPONSE_MAX];
 	uint8_t 	count;

@@ -59,6 +59,7 @@
 #include "rf_802_15_4.h"
 #include "control_message.h"
 #include "cipv6.h"
+#include "gpio.h"
 
 /*
 [NAME]
@@ -103,7 +104,9 @@ extern portCHAR cudp_check( buffer_t *buf );
 #define S_PORTBM		0x0F
 #define D_PORTBM		0xF0
 uint8_t use_compress=1;	/* Defaul also turnit on */
-
+#ifdef MALLFORMED_HEADERS
+extern uint8_t mallformed_headers_cnt;
+#endif
 portCHAR cudp_init( buffer_t *buf )
 { 
 	buf; 	
@@ -134,16 +137,11 @@ portCHAR cudp_handle( buffer_t *buf )
 #ifndef NO_FCS
 	uint16_t fcs;
 #endif
-	debug("cUDP: handler.\r\n");
+	debug("UDP:\r\n");
 	switch(buf->dir)
 	{
 		case BUFFER_DOWN:
-			debug("down: ");
-			debug("\r\n ptr: ");
-			debug_int(buf->buf_ptr);
-			debug(" end: ");
-			debug_int(buf->buf_end);
-			debug("\r\n");
+			debug("down\r\n");
 			/* Check data payload length */
 			udp_data_length = (buf->buf_end - buf->buf_ptr);
 
@@ -226,73 +224,51 @@ portCHAR cudp_handle( buffer_t *buf )
 			break;
 
 		case BUFFER_UP:
+			debug("UP\r\n");
 			/* Check data payload length */
 			udp_data_length = (buf->buf_end - buf->buf_ptr);
 			length=0;
 			dptr = buf->buf + buf->buf_ptr;
 			/* Lets check HC_UDP compress options */
-			switch (buf->options.lowpan_compressed)
+			if(buf->options.lowpan_compressed == COMPRESSED_HC_UDP)
 			{
-				/*case UNCOMPRESSED_HC_UDP:
-					// Read Src-port
-					udp_port = *dptr++;
-					udp_port <<= 8;
-					udp_port += *dptr++;
-					buf->src_sa.port=udp_port;
+				header_length = 3;
+				/* Decode Source and Destination port-number */
+				portfield = *dptr++;
+				/* Source port */
+				buf->src_sa.port = ((portfield & S_PORTBM) + HC2_ENCODE_P_VALUE );
+				/* Destination Port */
+				buf->dst_sa.port = ((portfield >> 4) + HC2_ENCODE_P_VALUE);
 
-					udp_port = *dptr++;
-					udp_port <<= 8;
-					udp_port += *dptr++;
-					buf->dst_sa.port=udp_port;
-
+				udp_data_length = ((buf->buf_end - buf->buf_ptr) - header_length);
+				length =(udp_data_length + 8);
+			}
+			else
+			{
+				header_length = 6;
+				/* Read Src-port */
+				udp_port = *dptr++;
+				udp_port <<= 8;
+				udp_port += *dptr++;
+				buf->src_sa.port=udp_port;
+					
+				udp_port = *dptr++;
+				udp_port <<= 8;
+				udp_port += *dptr++;
+				buf->dst_sa.port=udp_port;
+				if(buf->options.lowpan_compressed == UNCOMPRESSED_HC_UDP)
+				{
 					length = *dptr++;
 					length <<= 8;
 					length += *dptr++;
-					header_length=8;
-
+					header_length += 2;
 					udp_data_length = ((buf->buf_end - buf->buf_ptr) - header_length);
-					break;
-*/
-				case COMPRESSED_HC_UDP:
-					header_length = 3;
-					/* Decode Source and Destination port-number */
-					portfield = *dptr++;
-					/* Source port */
-					buf->src_sa.port = ((portfield & S_PORTBM) + HC2_ENCODE_P_VALUE );
-					/* Destination Port */
-					buf->dst_sa.port = ((portfield >> 4) + HC2_ENCODE_P_VALUE);
-
+				}
+				else
+				{
 					udp_data_length = ((buf->buf_end - buf->buf_ptr) - header_length);
 					length =(udp_data_length + 8);
-					break;
-				case UNCOMPRESSED_HC_UDP:
-
-				case LENGTH_COMPRESSED_HC_UDP:
-					header_length = 6;
-					/* Read Src-port */
-					udp_port = *dptr++;
-					udp_port <<= 8;
-					udp_port += *dptr++;
-					buf->src_sa.port=udp_port;
-					
-					udp_port = *dptr++;
-					udp_port <<= 8;
-					udp_port += *dptr++;
-					buf->dst_sa.port=udp_port;
-					if(buf->options.lowpan_compressed == UNCOMPRESSED_HC_UDP)
-					{
-						length = *dptr++;
-						length <<= 8;
-						length += *dptr++;
-						header_length += 2;
-						udp_data_length = ((buf->buf_end - buf->buf_ptr) - header_length);
-					}
-					else
-					{
-						udp_data_length = ((buf->buf_end - buf->buf_ptr) - header_length);
-						length =(udp_data_length + 8);
-					}
-					break;
+				}
 			}
 #ifndef NO_FCS			
 			/*fcs*/
@@ -306,7 +282,7 @@ portCHAR cudp_handle( buffer_t *buf )
 			buf-> buf_ptr = (dptr - buf->buf);	
 			if(buf->options.handle_type == HANDLE_NO_ROUTE_TO_DEST)
 			{
-				debug("UDP: no del info\r\n");
+				debug("UDP: del\r\n");
 				udp_port = buf->dst_sa.port;
 				buf->dst_sa.port = buf->src_sa.port;
 				buf->src_sa.port = udp_port;
@@ -320,7 +296,7 @@ portCHAR cudp_handle( buffer_t *buf )
 			{
 #ifndef NO_FCS			
 				if(fcs!=0x0000)
-#endif
+//#endif
 				{
 					/* Calculate and check fcs */
 					buf->buf_ptr -= 8; /* HC2, SPORT,DPORT and Check Sum */
@@ -331,7 +307,7 @@ portCHAR cudp_handle( buffer_t *buf )
 					*dptr++ = (uint8_t)buf->dst_sa.port;
 					*dptr++ = (length >> 8);	
 					*dptr++ = (uint8_t) length;	
-#ifndef NO_FCS			
+//#ifndef NO_FCS			
 					*dptr++ = (fcs >> 8);
 					*dptr++ = (uint8_t)fcs;
 
@@ -341,19 +317,25 @@ portCHAR cudp_handle( buffer_t *buf )
 						stack_buffer_free(buf);
 						buf=0;	
 					}
-#else	/*NO_FCS*/
-					*dptr++ = 0;
-					*dptr++ = 0;
-#endif	/*NO_FCS*/
+//#else	/*NO_FCS*/
+					//*dptr++ = 0;
+					//*dptr++ = 0;
+//#endif	/*NO_FCS*/
 					buf->buf_ptr += 8; /* HC2, SPORT,DPORT and Check Sum */
 					dptr = buf->buf + buf->buf_ptr;
 				}
-#ifndef NO_FCS			
+//#ifndef NO_FCS			
 				else
 				{
 					debug("FCS disable\r\n");
 				}
+//#else
+				//dptr = buf->buf + buf->buf_ptr;
 #endif
+
+
+
+
 #ifndef HAVE_NRP
 				if (buf && (buf->dst_sa.port == NPING_PORT || buf->dst_sa.port == UDP_ECHO_PORT) )
 				{ /*Ping*/
@@ -369,7 +351,7 @@ portCHAR cudp_handle( buffer_t *buf )
 						uint16_t tmp_fcs;
 #endif					
 
-						debug("cUDP: ping ->respond.\r\n");
+						//debug("cUDP: ping ->respond.\r\n");
 						/* Change Destination and Source-port */
 						udp_port = buf->dst_sa.port;
 						buf->dst_sa.port = buf->src_sa.port;
@@ -414,31 +396,29 @@ portCHAR cudp_handle( buffer_t *buf )
 
 						buf->buf_ptr -= tmp_8;
 						dptr = buf->buf + buf->buf_ptr;
-						switch (tmp_8)
+						if(tmp_8 > 3)
 						{
-							case 6:
-								buf->options.lowpan_compressed = LENGTH_COMPRESSED_HC_UDP; 
-								*dptr++ = (buf->src_sa.port >> 8);		
-								*dptr++ = (uint8_t) buf->src_sa.port;
-								*dptr++ = (buf->dst_sa.port >> 8);		
-								*dptr++ = (uint8_t)buf->dst_sa.port;
-								break;
-
-							case 3:
-								buf->options.lowpan_compressed = COMPRESSED_HC_UDP; 
-								*dptr++ = portfield;
-								break;
-
-							case 8:
-								buf->options.lowpan_compressed = 0;
-								*dptr++ = (buf->src_sa.port >> 8);		
-								*dptr++ = (uint8_t) buf->src_sa.port;
-								*dptr++ = (buf->dst_sa.port >> 8);		
-								*dptr++ = (uint8_t)buf->dst_sa.port;
+							*dptr++ = (buf->src_sa.port >> 8);		
+							*dptr++ = (uint8_t) buf->src_sa.port;
+							*dptr++ = (buf->dst_sa.port >> 8);		
+							*dptr++ = (uint8_t)buf->dst_sa.port;
+							if( tmp_8 > 6)
+							{
 								*dptr++ = (length >> 8);
 								*dptr++ = (uint8_t) length;
-								break;
+								buf->options.lowpan_compressed = 0;
+							}
+							else
+							{
+								buf->options.lowpan_compressed = LENGTH_COMPRESSED_HC_UDP; 
+							}
 						}
+						else
+						{
+							buf->options.lowpan_compressed = COMPRESSED_HC_UDP; 
+							*dptr++ = portfield;
+						}
+
 #ifndef NO_FCS
 					/* Add FCS */
 						*dptr++ = (tmp_fcs >> 8);		
@@ -450,7 +430,7 @@ portCHAR cudp_handle( buffer_t *buf )
 						buf->socket = 0;
 						buf->from = MODULE_CUDP;
 						buf->dir = BUFFER_DOWN;
-						buf->to = MODULE_NONE;
+						buf->to = MODULE_CIPV6;
 						stack_buffer_push(buf);
 						buf=0;
 					}
@@ -460,13 +440,13 @@ portCHAR cudp_handle( buffer_t *buf )
 
 			if (buf)
 			{ /*normal processing*/
-				debug("Src port ");
-				debug_hex((buf->src_sa.port));
-				debug("\r\n");
+				//debug("Src port ");
+				//debug_int((buf->src_sa.port));
+				//debug("\r\n");
 
-				debug("Dst port ");
-				debug_hex((buf->dst_sa.port));
-				debug("\r\n");
+				//debug("Dst port ");
+				//debug_int((buf->dst_sa.port));
+				//debug("\r\n");
 				buf->from = MODULE_CUDP;
 				buf->to = MODULE_NONE;
 				buf->buf_ptr = (dptr - buf->buf); // Move the buffer pointer
@@ -478,8 +458,6 @@ portCHAR cudp_handle( buffer_t *buf )
 #else
 				stack_buffer_push(buf);
 #endif
-					
-
 				buf=0;
 			}
 			break;

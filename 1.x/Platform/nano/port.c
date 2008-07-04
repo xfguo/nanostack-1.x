@@ -120,6 +120,13 @@ any details of its type. */
 typedef void tskTCB;
 extern volatile tskTCB * volatile pxCurrentTCB;
 
+
+#ifdef AMR_READER
+volatile portSHORT usTickCntr;
+volatile portSHORT usTickS;
+extern void second_update(void);
+#endif
+
 /*
  * Setup the hardware to generate an interrupt off timer 2 at the required 
  * frequency.
@@ -245,7 +252,9 @@ void vPortEndScheduler( void )
 	/* Not implemented for this port. */
 }
 /*-----------------------------------------------------------*/
-
+#ifdef IR_READER_UART
+extern void ir_uart_rx_check(void);
+#endif
 /*
  * Manual context switch.  The first thing we do is save the registers so we
  * can use a naked attribute.
@@ -262,6 +271,9 @@ void vPortYield( void ) _naked
 	portCOPY_STACK_TO_XRAM();
 
 	/* Call the standard scheduler context switch function. */
+#ifdef IR_READER_UART
+	//ir_uart_rx_check();
+#endif
 	vTaskSwitchContext();
 
 	/* Copy the stack of the task about to execute from XRAM into RAM and
@@ -299,18 +311,21 @@ extern void	nrp_uart_rx_check(void);
 		ST2 = (unsigned char) (ulTimerValue >> 16);
 		ST1 = (unsigned char) (ulTimerValue >> 8);
 		ST0 = (unsigned char) ulTimerValue;
-		
+
 		vTaskIncrementTick();
 #ifdef HAVE_NRP
 #ifndef NRP_UART_DMA_RX
 		nrp_uart_rx_check();
 #endif
 #endif
+#ifdef AMR_READER
+		second_update();
+#endif
+//#ifdef IR_READER_UART
+		//ir_uart_rx_check();
+//#endif
 		vTaskSwitchContext();
-
-		
 		IRCON &= ~STIF;
-
 		portCOPY_XRAM_TO_STACK();
 		portRESTORE_CONTEXT();
 		EA = 1;
@@ -356,6 +371,10 @@ static void prvSetupTimerInterrupt( void )
 	ST2 = (unsigned char) (ulTimerValue >> 16);
 	ST1 = (unsigned char) (ulTimerValue >> 8);
 	ST0 = (unsigned char) ulTimerValue;
+#ifdef AMR_READER
+	usTickCntr = 0;
+	usTickS = 0;
+#endif
 	IEN0 |= STIE;
 }
 

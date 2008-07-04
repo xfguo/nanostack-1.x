@@ -140,7 +140,7 @@ socket_t *socket(module_id_t protocol,
 		retvalue->callback = sock_handler;
 		if ( (retvalue->queue == 0) && (sock_handler == 0) )
 		{ 
-			retvalue->queue = xQueueCreate( 8, sizeof( buffer_t * ) );
+			retvalue->queue = xQueueCreate( 2, sizeof( buffer_t * ) );
 			debug("socket: Queue created.\r\n");
 		}
 		module = module_get(stacks[stack].module[temp]);
@@ -355,19 +355,9 @@ socket_t *socket_find (uint16_t port, sockaddr_t *sa)             /* Port to che
 buffer_t *socket_buffer_get(socket_t * si) 
 {	 
 	buffer_t *buffer = 0;
-	//uint8_t i;
-	//uint16_t ptr;
-	
   if (/*(si->stack_id >= 0) && */(buffer=stack_buffer_get(20)) )
   { /*not a listen socket and we got the buffer*/
 		
-		//ptr = 0;
-		/*for (i=0; i< stacks[si->stack_id].layers; i++)
-		{
-			ptr += module_get(stacks[si->stack_id].module[i])->hdr_size;
-		}
-		buffer->buf_ptr = ptr;
-		buffer->buf_end = ptr;*/
 		buffer->socket = (void *) si;
 		buffer->from = MODULE_APP;
 		buffer->to = MODULE_NONE;

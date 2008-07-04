@@ -52,6 +52,9 @@ void usage(char *prg_name)
 	printf("	-m/--mac	Read device MAC address\n");	
 	printf("	-Q/--write-mac [MAC address]	Write device MAC address\n");	
 	printf("	-e/--erase			Erase flash (erases MAC address!)\n");
+	printf("Programming options:\n");
+	printf("	-l/--linear Force linear model for extended addresses (not SDCC file)\n");
+	printf("	-s/--sdcc   Force SDCC model for extended addresses (SDCC file)\n");
 	printf("Defaults:\n");
 #ifndef PLATFORM_WINDOWS
 	printf("device /dev/ttyUSB0\n");
@@ -66,7 +69,7 @@ static int option_index = 0;
 
 int do_exit = 0;
 
-#define OPTIONS_STRING "d:ec1mVbP:v:r:Q:"
+#define OPTIONS_STRING "d:ec1lsmVbP:v:r:Q:"
 /* long option list */
 static struct option long_options[] =
 {
@@ -75,6 +78,8 @@ static struct option long_options[] =
   {"d100", 0, NULL, '1'},                
   {"erase", 0, NULL, 'e'},
   {"mac", 0, NULL, 'm'},
+  {"linear", 0, NULL, 'l'},
+  {"sdcc", 0, NULL, 's'},
   {"cdi", 0, NULL, 'c'},
   {"version", 0, NULL, 'V'},
   {"bios", 0, NULL, 'b'},
@@ -126,7 +131,31 @@ int parse_opts(int count, char* param[])
 				conf_opts.action = 'P';
 				strcpy(conf_opts.ihex_file, optarg);
 				break;
-			
+
+			case 's':
+				if (conf_opts.page_mode == PAGE_UNDEFINED)
+				{
+					conf_opts.page_mode = PAGE_SDCC;
+				}
+				else
+				{
+					printf("Only one paging option allowed.\n");
+					error = -1;
+				}
+				break;
+				
+			case 'l':
+				if (conf_opts.page_mode == PAGE_UNDEFINED)
+				{
+					conf_opts.page_mode = PAGE_LINEAR;
+				}
+				else
+				{
+					printf("Only one paging option allowed.\n");
+					error = -1;
+				}
+				break;
+				
 			case 'e':
 				printf("Erase.\n");
 				conf_opts.action = 'e';
@@ -390,6 +419,8 @@ int main(int argc, char *argv[])
 	conf_opts.device = 0;
 #endif
 
+	conf_opts.page_mode = PAGE_UNDEFINED;
+	
 	if ( (argc <= 1) || (error = parse_opts(argc, argv)) )
 	{
 		usage(argv[0]);

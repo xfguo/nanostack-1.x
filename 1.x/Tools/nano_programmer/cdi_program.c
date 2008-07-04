@@ -334,6 +334,62 @@ int cdi_write(port_t *port, conf_opts_t *conf, FILE *ihex)
 	memset(page_table, 0, 64);
 	memset(page_buffer, 0xFF, sizeof(page_buffer));
 	pages = 0;
+
+	error = 0;
+	
+	if (conf->page_mode == PAGE_UNDEFINED)
+	{
+		int retval;
+		
+		while((!error) && ((retval = fscanf(ihex, "%s", buffer)) == 1) )
+		{	
+			unsigned char data_len = 0;
+
+			if (memcmp(&buffer[7], "00", 2) == 0)
+			{	/*Data record*/
+			}
+			else if (memcmp(&buffer[7], "01", 2) == 0)
+			{	/*end file*/
+				printf("\nFile read complete.\n");
+				break;
+			}
+			else if (memcmp(&buffer[7], "04", 2) == 0)
+			{
+				sscanf((char *)&(buffer[3]),"%4hx", &addr);
+				sscanf((char *)&(buffer[9]),"%4lx", &ext_addr);
+
+				if (ext_addr >= 0x0002)
+				{
+					 conf->page_mode = PAGE_SDCC;
+				}
+				else
+				{
+					if (conf->page_mode == PAGE_UNDEFINED) conf->page_mode = PAGE_LINEAR;
+				}
+			}
+		}
+		if (retval == -1)
+		{
+			printf("Read error\n");
+			return -1;
+		}
+		rewind(ihex);
+		retval = 0;
+		error = 0;
+	}
+	switch (conf->page_mode)
+	{
+		case PAGE_SDCC:
+			printf("SDCC banked file.\n");
+			break;
+		case PAGE_LINEAR:
+			printf("Linear banked file.\n");
+			break;
+		case PAGE_UNDEFINED:
+			printf("Non-banked file, assuming linear.\n");
+			conf->page_mode = PAGE_LINEAR;
+			break;
+	}
 	
 	while( (fscanf(ihex, "%s", buffer) == 1) && !error)
 	{	
@@ -351,7 +407,7 @@ int cdi_write(port_t *port, conf_opts_t *conf, FILE *ihex)
 				if (page_table[absolute_address/2048] == 0) 
 				{
 					page_table[absolute_address/2048] = 1;
-					printf("Writing %d pages.\r", ++pages);
+					pages++;
 				}
 				sscanf((char *)&buffer[2*i+9], "%2hhx", &page_buffer[absolute_address]);
 				i++;
@@ -360,15 +416,23 @@ int cdi_write(port_t *port, conf_opts_t *conf, FILE *ihex)
 		else if (memcmp(&buffer[7], "01", 2) == 0)
 		{	/*end file*/
 			printf("\nFile read complete.\n");
+			printf("Writing %d pages.\n", pages);
 			break;
 		}
 		else if (memcmp(&buffer[7], "04", 2) == 0)
 		{
 			sscanf((char *)&(buffer[3]),"%4hx", &addr);
 			sscanf((char *)&(buffer[9]),"%4lx", &ext_addr);
-			printf("\nExtended page address: 0x%8.8lX\n", ext_addr*0x8000 );
-			if (ext_addr) ext_addr--;
-			ext_addr *= 0x8000;
+			if (conf->page_mode == PAGE_SDCC)
+			{
+				if (ext_addr) ext_addr--;
+				ext_addr *= 0x8000;
+			}
+			else
+			{
+				ext_addr *= 0x10000;
+			}
+			printf("\rExtended page address: 0x%8.8lX\r", ext_addr);
 		}
 	}
 

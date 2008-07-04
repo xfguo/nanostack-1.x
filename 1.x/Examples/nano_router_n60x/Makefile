@@ -10,7 +10,7 @@
 #
 # make program = Download the hex file to the device
 
-APP=nano_router_n60x
+APP=nano_router_n600
 
 #Directories
 SOURCE_DIR = ../../FreeRTOS/Source

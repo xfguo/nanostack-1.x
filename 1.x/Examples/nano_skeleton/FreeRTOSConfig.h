@@ -88,7 +88,7 @@ extern __xdata __at (0xFD58) volatile_ram2[423];*/
 #endif
 #define configUSE_PREEMPTION		1
 #define configCPU_CLOCK_HZ			( ( unsigned portLONG ) 32000000 ) 
-#define configTICK_RATE_HZ			( ( portTickType ) 100 )
+#define configTICK_RATE_HZ			( ( portTickType ) 200 )
 #define configMAX_PRIORITIES		( ( unsigned portBASE_TYPE ) 4 )
 #define configMINIMAL_STACK_SIZE	( ( unsigned portSHORT ) 80 )
 #define configMAXIMUM_STACK_SIZE	( ( unsigned portSHORT ) 254 - configSTACK_START )
@@ -99,7 +99,6 @@ extern __xdata __at (0xFD58) volatile_ram2[423];*/
 #define configIDLE_SHOULD_YIELD		0
 
 /* Version 4.0.x configuration */
-#define configUSE_TICK_HOOK 1
 
 #define configUSE_CO_ROUTINES 0
 #define configMAX_CO_ROUTINE_PRIORITIES 1
@@ -111,7 +110,7 @@ to exclude the API function. */
 #define INCLUDE_uxTaskPriorityGet		0
 #define INCLUDE_vTaskDelete			1
 #define INCLUDE_vTaskCleanUpResources		0
-#define INCLUDE_vTaskSuspend			0
+#define INCLUDE_vTaskSuspend			1
 #define INCLUDE_vTaskDelayUntil			1
 #define INCLUDE_vTaskDelay			1
 

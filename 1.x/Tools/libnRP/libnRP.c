@@ -922,6 +922,15 @@ int libnrp_get_source_address(unsigned char *buffer, unsigned int buflen, unsign
 				case 0x07:
 					libnrp_index += 5;
 					break;
+					
+				default:
+					libnrp_field_len = ((uint16_t)buffer[libnrp_index+1]) << 8;
+					libnrp_field_len += ((uint16_t)buffer[libnrp_index+2]);
+					libnrp_index += 3;
+					libnrp_index += libnrp_field_len;
+					libnrp_debug(NRP_DEBUG, "Unknown tag, skip %d bytes.\n", libnrp_field_len);
+					break;
+					
 			}
 		}
 		return(1);
@@ -1052,6 +1061,14 @@ int libnrp_get_destination_address(unsigned char *buffer, unsigned int buflen, u
 				case 0x07:
 					libnrp_index += 5;
 					break;
+					
+				default:
+					libnrp_field_len = ((uint16_t)buffer[libnrp_index+1]) << 8;
+					libnrp_field_len += ((uint16_t)buffer[libnrp_index+2]);
+					libnrp_index += 3;
+					libnrp_index += libnrp_field_len;
+					libnrp_debug(NRP_DEBUG, "Unknown tag, skip %d bytes.\n", libnrp_field_len);
+					break;
 			}
 		}
 	}
@@ -1140,6 +1157,15 @@ int libnrp_get_data(unsigned char *buffer, unsigned int buflen, unsigned char *d
 					libnrp_debug(NRP_DEBUG, "Tag:0x07\n");
 					libnrp_index += 5;
 					break;
+					
+				default:
+					libnrp_field_len = ((uint16_t)buffer[libnrp_index+1]) << 8;
+					libnrp_field_len += ((uint16_t)buffer[libnrp_index+2]);
+					libnrp_index += 3;
+					libnrp_index += libnrp_field_len;
+					libnrp_debug(NRP_DEBUG, "Unknown tag, skip %d bytes.\n", libnrp_field_len);
+					break;
+					
 			}
 		}
 	}
@@ -1505,6 +1531,15 @@ int libnrp_parse_nrp_hdr(unsigned char *buffer, unsigned char buflen, unsigned c
 					
 					libnrp_index += 5;
 					break;
+					
+				default:
+					field_len = ((uint16_t)buffer[libnrp_index+1]) << 8;
+					field_len += ((uint16_t)buffer[libnrp_index+2]);
+					libnrp_index += 3;
+					libnrp_index += field_len;
+					libnrp_debug(NRP_DEBUG, "Unknown tag, skip %d bytes.\n", field_len);
+					break;
+					
 			}
 		}
 	}

@@ -87,19 +87,12 @@ void mac_set(sockaddr_t *address)
 		case ADDR_802_15_4_PAN_SHORT:
 		case ADDR_802_15_4_SHORT:
 			memcpy(&(mac_short), address,  sizeof(sockaddr_t));
-#ifdef HAVE_RF_802_15_4
-			mac_set_mac_pib_parameter(mac_short.address, MAC_SHORT_ADDRESS);
-#endif
 			break;
 
 		case ADDR_802_15_4_PAN_LONG:
 		case ADDR_802_15_4_LONG:
 		default:
 			memcpy(&(mac_long), address, sizeof(sockaddr_t));
-#ifdef HAVE_RF_802_15_4
-			mac_set_mac_pib_parameter(mac_long.address, MAC_IEEE_ADDRESS);
-			rf_802_15_4_ip_layer_address_mode_set(0);
-#endif
 			break;
 	}
 }
