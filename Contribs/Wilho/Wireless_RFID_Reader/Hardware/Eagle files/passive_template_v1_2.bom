@@ -1,0 +1,17 @@
+{\rtf1\ansi\deff0{\fonttbl{\f0\fmodern\fprq1\fcharset0 Courier New;}}{\colortbl ;\red0\green0\blue0;}\viewkind4\uc1\pard\cf1\lang1035\f0\fs12 
+ Partlist exported from C:/Atomit/RFID-reader/hw/passive_template_v1_2.sch at 28.02.2007 14:53:44 \par\par
+
+\ul Qty | Value | Device | Parts | Description | Manufacturer | Source | Ordercode | Eur | Type | Stock | Ext | ROHS | ID | Euro100 | Gen\ulnone\par
+8   |       | CAP/NP | C1, C |             |              |        |           |     |      |       |     |      |    |         |    \par
+    |       | /0603  | 2, C3 |             |              |        |           |     |      |       |     |      |    |         |    \par
+    |       |        | , C4, |             |              |        |           |     |      |       |     |      |    |         |    \par
+    |       |        |  C5,  |             |              |        |           |     |      |       |     |      |    |         |    \par
+    |       |        | C6, C |             |              |        |           |     |      |       |     |      |    |         |    \par
+    |       |        | 7, C8 |             |              |        |           |     |      |       |     |      |    |         |    \par
+\ul     |       |        |       |             |              |        |           |     |      |       |     |      |    |         |    \ulnone\par
+4   |       | RESIST | R1, R |             |              |        |           |     |      |       |     |      |    |         |    \par
+    |       | OR/060 | 2, R3 |             |              |        |           |     |      |       |     |      |    |         |    \par
+\ul     |       | 3      | , R4  |             |              |        |           |     |      |       |     |      |    |         |    \ulnone\par
+2   | IND   | IND    | U$2,  |             |              |        |           |     |      |       |     |      |    |         |    \par
+\ul     |       |        | U$3   |             |              |        |           |     |      |       |     |      |    |         |    \ulnone\par
+\ul 1   | PN512 | PN512  | U$1   |             |              |        |           |     |      |       |     |      |    |         |    \ulnone\par

@@ -1,0 +1,10 @@
+Contents of the Software folder:
+
+Directory	Contents
+
+rfid		Software for the "read only" RFID Reader
+
+rfidrw		Software for the "read-and-write" RFID Reader
+
+nReader		Software for the PC application that controls the
+		"read-and-write" RFID Reader

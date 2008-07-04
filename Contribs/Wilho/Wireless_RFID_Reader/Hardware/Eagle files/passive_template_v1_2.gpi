@@ -1,0 +1,43 @@
+Photoplotter Info File: C:/Atomit/RFID-reader2/hw/passive_template_v1_2.gpi
+
+ Date              : 05.09.2007 15:31:01 
+ Plotfile          : C:/Atomit/RFID-reader2/hw/passive_template_v1_2.smb
+ Apertures         : generated: 
+ Device            : Gerber photoplotter with RS-274-X aperture generation
+
+Parameter settings:
+
+ Emulate Apertures : no
+ Emulate Thermal   : no
+ Emulate Annulus   : no
+ Tolerance Draw  + :  0.00 %
+ Tolerance Draw  - :  0.00 %
+ Tolerance Flash + :  0.00 %
+ Tolerance Flash - :  0.00 %
+ Rotate            : no
+ Mirror            : no
+ Optimize          : yes
+ Auto fit          : yes
+ OffsetX           : 0inch
+ OffsetY           : 0inch
+
+Plotfile Info:
+
+ Coordinate Format : 2.4
+ Coordinate Units  : Inch
+ Data Mode         : Absolute
+ Zero Suppression  : None
+ End Of Block      : *
+
+Apertures used:
+
+ Code     Shape     Size                  used
+
+ D10      round     0.1039inch               4
+ D11      oval      0.1320inch x 0.0720inch    22
+ D12      oval      0.1144inch x 0.0624inch     2
+ D13      round     0.0618inch               5
+ D14      round     0.0850inch               2
+ D15      round     0.0475inch              43
+ D16      round     0.0475inch               2
+
